@@ -22,12 +22,14 @@
 #include "front.h"
 #include "game_profile.h"
 #include "haptics_apple.h"
+#include "face_swap.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
 
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t g_touch_btn, g_pad_btn, g_shake_btn;
+static BOOL g_face_swap;
 static int32_t g_touch_lx, g_touch_ly, g_touch_rx, g_touch_ry, g_pad_lx, g_pad_ly, g_pad_rx, g_pad_ry;
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
 static void publish(void) {
@@ -35,7 +37,7 @@ static void publish(void) {
     int32_t lx = g_touch_lx, ly = g_touch_ly, rx = g_touch_rx, ry = g_touch_ry;
     if (tilted(g_pad_lx, g_pad_ly)) { lx = g_pad_lx; ly = g_pad_ly; }   // a tilted physical stick wins
     if (tilted(g_pad_rx, g_pad_ry)) { rx = g_pad_rx; ry = g_pad_ry; }
-    dm_input_set(g_touch_btn | g_pad_btn | g_shake_btn, lx, ly, rx, ry);
+    dm_input_set(dm_face_swap(g_touch_btn | g_pad_btn | g_shake_btn, g_face_swap), lx, ly, rx, ry);
     pthread_mutex_unlock(&g_mu);
 }
 
@@ -132,6 +134,8 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
 - (instancetype)initWithFrame:(CGRect)f {
     if ((self = [super initWithFrame:f])) {
         self.multipleTouchEnabled = YES; self.opaque = NO; self.backgroundColor = UIColor.clearColor;
+        const char *swap = getenv("DM_SWAP_FACE_BUTTONS");
+        g_face_swap = swap && atoi(swap) != 0;
         const char *feedback = getenv("DM_TOUCH_HAPTICS");
         if (!feedback || atoi(feedback)) {
             _touchFeedback = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight];
@@ -153,6 +157,10 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         for (int b = 0; b < B_N; b++) {
             _key[b] = shape(_controls);
             if (names[b]) _label[b] = label(_key[b], names[b]);   // the D-pad arms carry no label
+        }
+        if (g_face_swap) {
+            _label[B_A].string = @"B"; _label[B_B].string = @"A";
+            // Keep X/Y labels at their original positions so each sends the opposite button.
         }
         _swap = shape(_controls); _swapLabel = label(_swap, @"");
         NSNumber *saved = [NSUserDefaults.standardUserDefaults objectForKey:k_layout_key];
@@ -427,7 +435,7 @@ static void read_pad(GCExtendedGamepad *g) {
     K(g.dpad.left, B_LEFT); K(g.dpad.up, B_UP); K(g.dpad.right, B_RIGHT); K(g.dpad.down, B_DOWN);
     #undef K
     pthread_mutex_lock(&g_mu);
-    g_pad_btn = m; g_pad_lx = axis(g.leftThumbstick.xAxis.value); g_pad_ly = axis(g.leftThumbstick.yAxis.value);
+    g_pad_btn = dm_pad_before_face_swap(m, g_face_swap); g_pad_lx = axis(g.leftThumbstick.xAxis.value); g_pad_ly = axis(g.leftThumbstick.yAxis.value);
     g_pad_rx = axis(g.rightThumbstick.xAxis.value); g_pad_ry = axis(g.rightThumbstick.yAxis.value);
     pthread_mutex_unlock(&g_mu);
     publish();

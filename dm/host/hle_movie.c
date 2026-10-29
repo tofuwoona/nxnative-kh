@@ -5,6 +5,7 @@
 #include <arm_neon.h>
 #include <mach/mach.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <unistd.h>
 #include "vpx/vpx_decoder.h"
 #include "vpx/vp8dx.h"
@@ -39,7 +40,7 @@ HLE_FORCE("_ZN5movie9Extractor13SetDataSourceEPKc", "movie demuxer: the host doe
 // The host implements the same protocol and decodes VP9 with libvpx (dm/third_party/libvpx). Input packets queue in arrival order; whenever an output slot is free, the head packet is decoded and its input index returned, and a picture goes to the ready-output queue with its time and flags copied
 // (the end-of-stream flag comes back with the last frame). While the client holds every output slot, packets stay queued and their input indices are not returned (as with MediaCodec: a decoder only consumes input when it has a free output); each output index the client returns lets one more packet be decoded.
 // The size comes from Configure's MediaData, or else from the VP9 header of the first key frame. Unity allocates its output buffers itself as width × height × 1.5 (it does not call GetOutputBufferSize), so the stride is the width and the plane height the height, unaligned.
-// Decoding runs on each decoder's own host thread, and the guest thread that sends a packet or returns an output index waits for it: guest threads run on guest stacks given by the SDK, and libvpx's stack frames are large. Events are still signalled by guest threads (SignalEvent is guest code).
+// Decoding runs on each decoder's own host thread, and the guest thread that sends a packet or returns an output index waits for it: guest threads run on guest stacks given by the SDK, and libvpx's stack frames are large. Bound decoder events signal through the host event table (so a wake can re-enter movie code without re-entering guest SignalEvent); an unbound event falls back to guest SignalEvent.
 // Buffer / MediaData / event operations call the SDK's own functions (guest_sym), so the host needs no knowledge of their layouts.
 
 #define MD_NIN 4                 // input buffers
@@ -123,14 +124,26 @@ static int ev_ok(const void *p) {
 // (SendOutputBufferEventAvailableToClient and the others, subsdk0+0x1feb0 in DRAGON QUEST XI S). That game's movie player registers its struct before it fills it (main+0x39edab0, right after
 // the Decoder constructor: leftover values such as 0xe00000010, sometimes 0 or a stray pointer), so the entry is read at signal time; when it is not an event (any longer), the event it held
 // at registration is used, if any
-static void md_event(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
+static void *md_event_ptr(mdec_t *d, int i) {   // 0 input 1 output 2 format 3 error
     void *p = NULL; vm_size_t got = 0;
     if (d->evc && (vm_read_overwrite(mach_task_self(), (vm_address_t)&d->evc[i], sizeof p, (vm_address_t)&p, &got) != KERN_SUCCESS || got != sizeof p)) p = NULL;
     void *live = p;
     if (!p || !ev_ok(p)) p = d->ev[i];
-    if (p) G.signal(p);
-    else if (live) { static _Atomic int red; if (red++ < 8) LOG("[RED] movie: decoder %p event %d not delivered: the client's entry %p is not an event", (void *)d, i, live); }
+    if (!p && live) { static _Atomic int red; if (red++ < 8) LOG("[RED] movie: decoder %p event %d not delivered: the client's entry %p is not an event", (void *)d, i, live); }
+    return p;
 }
+static void md_signal_event_ptr(void *p, int i) {
+    if (!p) return;
+    if (hle_signal_bound_system_event(p)) {
+        static _Atomic uint32_t noted; uint32_t bit = 1u << (unsigned)i;
+        if (!(atomic_fetch_or(&noted, bit) & bit)) LOG("[movie] decoder event %d signalled through the host event table", i);
+    } else {
+        static _Atomic uint32_t fallback_noted; uint32_t bit = 1u << (unsigned)i;
+        if (!(atomic_fetch_or(&fallback_noted, bit) & bit)) LOG("[movie] decoder event %d is unbound; falling back to guest SignalEvent", i);
+        G.signal(p);
+    }
+}
+static void md_event(mdec_t *d, int i) { md_signal_event_ptr(md_event_ptr(d, i), i); }
 // Deferred events: "input available" after Start / Flush. The SDK's decoder signals it asynchronously from its own codec thread; Metroid Dread calls InitializeMultiWaitHolder before RegisterClientEvents
 // and only later links the holders into its MultiWait. Signalled synchronously inside Start, the holders were not linked yet and SignalEvent crashed in MultiWaitImpl::NotifyAndWakeupThread on a null MultiWait (0x20)
 // (it showed only when a decoder was built a second time in the same memory). A guest thread now signals it about 2 ms later (SignalEvent is guest code and must be called on a guest thread); the destructor drops that decoder's pending signals under the same lock.
@@ -403,6 +416,7 @@ static void md_job(mdec_t *d, int job) {
 }
 // while packets are queued and an output slot is free, decode the head packet, until the queue is empty or every slot is taken; signal the input / output events by the result
 static void md_pump(mdec_t *d) {
+    int signal_input = 0, signal_output = 0;
     pthread_mutex_lock(&d->dmu);
     for (;;) {
         pthread_mutex_lock(&d->mu);
@@ -415,7 +429,7 @@ static void md_pump(mdec_t *d) {
             d->out[s].pic = got; d->out[s].pts = got ? d->jpts_out : 0; d->out[s].flags = left ? 0 : 4; d->outq[d->noutq++] = s;
             if (!left) d->avc_drain = 0;
             pthread_mutex_unlock(&d->mu);
-            md_event(d, 1);
+            signal_output = 1;
             continue;
         }
         int slot = -1;
@@ -441,10 +455,16 @@ static void md_pump(mdec_t *d) {
         if (more) d->avc_drain = 1;
         int ineos = d->in_eos;
         pthread_mutex_unlock(&d->mu);
-        if (!ineos) md_event(d, 0);   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
-        if (ready) md_event(d, 1);
+        if (!ineos) signal_input = 1;   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
+        if (ready) signal_output = 1;
     }
+    // Resolve event pointers while the decoder is serialized, then signal only after releasing dmu.
+    // SignalEvent can wake an I/O worker that re-enters SendInputBufferForDecode → md_pump.
+    void *input_ev = signal_input ? md_event_ptr(d, 0) : NULL;
+    void *output_ev = signal_output ? md_event_ptr(d, 1) : NULL;
     pthread_mutex_unlock(&d->dmu);
+    if (input_ev) md_signal_event_ptr(input_ev, 0);
+    if (output_ev) md_signal_event_ptr(output_ev, 1);
 }
 
 HLE_FORCE("_ZN5movie7DecoderC1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi", "movie decoder: host implementation (no NVIDIA hardware decoder; VP9 with libvpx, AVC with VideoToolbox)",

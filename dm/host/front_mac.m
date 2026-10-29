@@ -9,6 +9,9 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <GameController/GameController.h>
+#ifdef DM_WITH_SDL2
+#include "mac_sdl_input.h"
+#endif
 #include "dm.h"
 #include "dm_input.h"
 #include "front.h"
@@ -130,6 +133,9 @@ static void pad_read(GCExtendedGamepad *g) {
 }
 static const char *pad_name(GCController *c) { return c.vendorName.UTF8String ?: "?"; }
 static void npad_name(int p, char *out, size_t cap) { uint32_t id = dm_player_npad(p); if (id == 0x20) snprintf(out, cap, "handheld"); else snprintf(out, cap, "%u", id); }
+#ifdef DM_WITH_SDL2
+static void sdl_close_pad(void);
+#endif
 // Called at start and on every connect / disconnect (gone: the controller that was just removed, nil on a connect)
 static void pads_changed(GCController *gone) {
     if (g_merge) {
@@ -159,6 +165,55 @@ static void pads_changed(GCController *gone) {
     }
     dm_pad_players(pad_slot_mask(&g_slots));
 }
+#ifdef DM_WITH_SDL2
+// Opt-in fallback for controllers SDL recognizes but GameController does not.
+// Refuse SDL while an extended GC controller exists to avoid double ownership.
+static SDL_GameController *g_sdl;
+static int g_sdl_slot = -1;
+static void sdl_close_pad(void) {
+    if (!g_sdl) return;
+    if (g_sdl_slot >= 0) dm_pad_set_player(g_sdl_slot, 0, 0, 0, 0, 0);
+    if (!g_merge) pad_slot_free(&g_slots, g_sdl);
+    SDL_GameControllerClose(g_sdl); g_sdl = NULL; g_sdl_slot = -1;
+    if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+}
+static void sdl_poll_pad(void) {
+    SDL_GameControllerUpdate();
+    BOOL has_gc = NO;
+    for (GCController *c in GCController.controllers) if (c.extendedGamepad) { has_gc = YES; break; }
+    if (has_gc || (g_sdl && !SDL_GameControllerGetAttached(g_sdl))) sdl_close_pad();
+    if (has_gc) return;
+    if (!g_sdl) for (int i = 0; i < SDL_NumJoysticks(); i++) if (SDL_IsGameController(i)) {
+        SDL_GameController *c = SDL_GameControllerOpen(i); if (!c) continue;
+        int p = g_merge ? 0 : pad_slot_take(&g_slots, c, SDL_GameControllerName(c));
+        if (p < 0) { SDL_GameControllerClose(c); break; }
+        g_sdl = c; g_sdl_slot = p;
+        if (!g_merge) dm_pad_players(pad_slot_mask(&g_slots));
+        LOG("SDL controller '%s' connected: player %d", SDL_GameControllerName(c), p + 1);
+        break;
+    }
+    if (!g_sdl || !g_input_on) return;
+    uint32_t buttons = 0;
+    for (int i = 0; i < SDL_CONTROLLER_BUTTON_MAX && i < 32; i++)
+        if (SDL_GameControllerGetButton(g_sdl, (SDL_GameControllerButton)i)) buttons |= 1u << i;
+    mac_pad_state p = mac_sdl_map(buttons,
+        SDL_GameControllerGetAxis(g_sdl, SDL_CONTROLLER_AXIS_LEFTX), SDL_GameControllerGetAxis(g_sdl, SDL_CONTROLLER_AXIS_LEFTY),
+        SDL_GameControllerGetAxis(g_sdl, SDL_CONTROLLER_AXIS_RIGHTX), SDL_GameControllerGetAxis(g_sdl, SDL_CONTROLLER_AXIS_RIGHTY),
+        SDL_GameControllerGetAxis(g_sdl, SDL_CONTROLLER_AXIS_TRIGGERLEFT), SDL_GameControllerGetAxis(g_sdl, SDL_CONTROLLER_AXIS_TRIGGERRIGHT));
+    dm_pad_set_player(g_sdl_slot, p.buttons, p.lx, p.ly, p.rx, p.ry);
+    static mac_pad_state last; static int seen;
+    if (getenv("DM_SDL_LOG") && (!seen || memcmp(&last, &p, sizeof p))) {
+        LOG("SDL input player %d buttons=%#llx left=%d,%d right=%d,%d", g_sdl_slot + 1, (unsigned long long)p.buttons, p.lx, p.ly, p.rx, p.ry);
+        last = p; seen = 1;
+    }
+}
+static void sdl_start_pad(void) {
+    const char *e = getenv("DM_SDL_GAMEPAD"); if (!e || strcmp(e, "1")) return;
+    if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) { LOG("SDL controller initialization failed: %s", SDL_GetError()); return; }
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    [NSTimer scheduledTimerWithTimeInterval:1.0/60.0 repeats:YES block:^(NSTimer *timer) { (void)timer; sdl_poll_pad(); }];
+}
+#endif
 // Focus: a window that is no longer key sees no key-up, mouse-up or controller release, so whatever is held when it loses focus (another app, the text box, minimized) would
 // stay pressed in the game. The front end releases only what it pressed itself: player 1's pad and the touch are also DM_KEYS / DM_CTL's (hle_hid.c), and a scripted hold goes on.
 // Out of focus a controller's changes are ignored, so back in focus each controller is read as it is now (a button still held, a stick still deflected)
@@ -169,6 +224,9 @@ static void input_release(void) {
     if (g_mouse_down) { g_mouse_down = 0; dm_touch_set(NULL, 0); }
     if (g_merge) { for (GCController *c in GCController.controllers) if (c.extendedGamepad) { dm_pad_set(0, 0, 0, 0, 0); break; } }
     else for (int p = 0; p < DM_PLAYERS; p++) if (g_held[p]) dm_pad_set_player(p, 0, 0, 0, 0, 0);
+#ifdef DM_WITH_SDL2
+    if (g_sdl_slot >= 0) dm_pad_set_player(g_sdl_slot, 0, 0, 0, 0, 0);
+#endif
 }
 static void input_resume(void) {
     g_input_on = 1;
@@ -261,10 +319,16 @@ void front_run(void (*guest)(void)) {
         for (NSNotificationName nm in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification])
             [NSNotificationCenter.defaultCenter addObserverForName:nm object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification *n) {
                 GCController *c = n.object; int conn = n.name == GCControllerDidConnectNotification;
+#ifdef DM_WITH_SDL2
+                if (conn && c.extendedGamepad) sdl_close_pad();
+#endif
                 if (!c.extendedGamepad || g_merge) LOG("controller %s: %s%s", conn ? "connected" : "disconnected", pad_name(c), c.extendedGamepad ? "" : " (no extended gamepad profile: not used)");
                 pads_changed(conn ? nil : c); }];
         dm_haptics_apple_init();
         pads_start();
+#ifdef DM_WITH_SDL2
+        sdl_start_pad();
+#endif
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown | NSEventMaskKeyUp handler:^NSEvent *(NSEvent *e) {
             if (e.window != win) return e;   // Only swallow keys for the game window; other windows such as the software keyboard input box receive typing as usual
             if (e.type == NSEventTypeKeyDown && (e.modifierFlags & NSEventModifierFlagCommand)) return e;   // ⌘ shortcuts go to the menu; a key released while ⌘ is held still reaches the game, or it would stay pressed

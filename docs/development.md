@@ -14,6 +14,10 @@ The README covers packing and playing. This page is for working on nxnative itse
 | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app. A settings screen comes before the game (`Launcher.swift`, drawn from `dm/launcher.json`, which `dm/games/settings.py` writes from `dm/games/settings.tsv`); the host's loading starts at app launch meanwhile, and the frame rate and render scale go into the frame step state when the game starts (`loader.c` `dm_fps_state_apply`) |
 | Known gaps | Conditional render is always drawn; `MultiDraw*IndirectCount` waits on the CPU for the GPU-written count; geometry shaders do not translate. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. The bundled prewarm lists are empty. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
 
+## Optional SDL controller fallback on macOS
+
+For a controller that SDL2 recognizes but Apple's GameController framework does not, install SDL2 and build the Mac host with `make -C dm/host GAME=<id> SDL2=1`. Start it with `DM_SDL_GAMEPAD=1`; without that flag the existing GameController path is unchanged. This fallback handles one SDL controller and defers to an extended GameController if one is connected, to avoid duplicate input. It maps by position, applies a 10% radial stick deadzone, and releases state on focus loss or disconnect. SDL rumble is not implemented. `DM_SDL_LOG=1` logs input changes for diagnosis. Run `make -C dm/host/tests sdl_input` for the mapping test. A provisional profile also needs the same `DM_GAMES_DIR` / `DM_GAMES_FIRST` values used to build the game.
+
 ## Guest memory SVCs
 
 `dm/host/hle_svc.c` serializes heap resizing, physical map/unmap, stack

@@ -15,6 +15,14 @@ endif
 endif
 GAME_H = gen/$(GAME)/game_profile.h
 CFLAGS=-O1 -g -Wall -Wno-unused-function
+ifeq ($(SDL2),1)
+SDL2_CONFIG := $(shell command -v sdl2-config)
+ifeq ($(SDL2_CONFIG),)
+$(error SDL2=1 requires sdl2-config)
+endif
+CFLAGS += -DDM_WITH_SDL2 $(shell $(SDL2_CONFIG) --cflags)
+SDL_LIBS := $(shell $(SDL2_CONFIG) --libs)
+endif
 # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
 SRC=main.c loader.c hle.c crash.c probe.c thread.c memstat.m haptics_apple.m $(sort $(wildcard hle_*.c)) front_mac.m entry.S
 # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
@@ -41,8 +49,14 @@ $(GAME_H): $(GAME_DIR)/game.tsv ../games/game.py FORCE
 # The game of the last build is also read when the Makefile is parsed, and a different one forces the link: make compares whole seconds, and a stamp written in the same second as
 # another game's dmhost (two builds in a row) did not count as newer, so that game's host was kept
 GAME_STAMP = gen/game.stamp
+SDL_STAMP = gen/sdl.stamp
 $(GAME_STAMP): FORCE
 	@mkdir -p gen; echo $(GAME) | cmp -s - $@ || echo $(GAME) > $@
+$(SDL_STAMP): FORCE
+	@mkdir -p gen; echo $(or $(SDL2),0) | cmp -s - $@ || echo $(or $(SDL2),0) > $@
+ifneq ($(shell cat $(SDL_STAMP) 2>/dev/null),$(or $(SDL2),0))
+dmhost: FORCE
+endif
 ifneq ($(strip $(GAME)),)
 ifneq ($(shell cat $(GAME_STAMP) 2>/dev/null),$(GAME))
 dmhost: FORCE
@@ -50,8 +64,8 @@ endif
 endif
 .PHONY: FORCE
 FORCE:
-dmhost: $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(VPX_LIB)
-	clang $(CFLAGS) -I../gfx/nvn/include -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) -framework Cocoa -framework QuartzCore -framework Metal -framework GameController -framework CoreHaptics -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
+dmhost: $(SRC) $(GFX) ../third_party/stb_vorbis/stb_vorbis.c dm.h hle.h dm_input.h pad_slots.h hle_haptics.h haptics_apple.h front.h $(GFX_H) $(GAME_H) $(GAME_STAMP) $(SDL_STAMP) $(VPX_LIB) $(if $(filter 1,$(SDL2)),mac_sdl_input.h)
+	clang $(CFLAGS) -I../gfx/nvn/include -I../third_party/vulkan-headers/include -I$(dir $(GAME_H)) -I$(VPX) -I../third_party/stb_vorbis -fobjc-arc -o $@ $(SRC) $(GFX) $(VPX_LIB) $(SDL_LIBS) -framework Cocoa -framework QuartzCore -framework Metal -framework GameController -framework CoreHaptics -framework AudioToolbox -framework VideoToolbox -framework CoreMedia -framework CoreVideo -framework ImageIO -framework UniformTypeIdentifiers
 clean:   # the host and everything make generates for it (gen/: the profile headers, the game stamp and the libvpx build; dmhost_* and *.dSYM beside them, as in .gitignore)
 	rm -rf gen dmhost dmhost_* *.dSYM
 .PHONY: clean

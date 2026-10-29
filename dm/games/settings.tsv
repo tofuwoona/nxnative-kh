@@ -14,5 +14,6 @@ DM_LANG	choice	languages	build:DM_LANG	languages>1	Game language
 DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	always	Frame-rate counter
 DM_METAL_HUD	toggle	-	0	always	Performance HUD
 DM_TOUCH_HAPTICS	toggle	-	1	always	Touch feedback
+DM_SWAP_FACE_BUTTONS	toggle	-	0	always	Swap face buttons	Swap A/B and X/Y for touch and physical controllers.
 DM_RUMBLE	toggle	-	1	always	Game rumble
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Rumble strength

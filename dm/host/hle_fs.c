@@ -308,9 +308,9 @@ static Result err_res(const char *op, const char *path) {
 
 // ---------- Mount ----------
 HLE_FORCE("_ZN2nn2fs22QueryMountRomCacheSizeEPm", "fsp-srv; rom reads the host directory directly, the cache gets only the minimum size", Result, h_fs_QueryRomCache, size_t *out) { *out = 0x1000; return RES_OK; }
-HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
+static Result mount_rom_from_env(const char *name, const char *key, void *cache, size_t sz) {
     (void)cache; (void)sz; char b[1024];
-    Result r = mount(name, envdir("DM_ROMFS", "romfs", b, sizeof b), 1);
+    Result r = mount(name, envdir(key, "romfs", b, sizeof b), 1);
     if (r == RES_OK && getenv("DM_ROMFS_OVERLAY")) {
         PATH_LOCK();
         for (int i = 0; i < g_nmnt; i++) if (!strcmp(g_mnt[i].name, name)) {
@@ -319,7 +319,19 @@ HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → host RomFS directory", 
     }
     return r;
 }
-// Add-on content (DLC) RomFS: DM_AOC_DIR/<index>/, extracted from the player's DLC NSPs by the packing script; mounted read-only, using the directory index like rom.
+HLE_FORCE("_ZN2nn2fs8MountRomEPKcPvm", "fsp-srv; rom → the current program's host RomFS directory", Result, h_fs_MountRom, const char *name, void *cache, size_t sz) {
+    return mount_rom_from_env(name, "DM_ROMFS", cache, sz);
+}
+// MountRom's program-index overload selects that program's separate RomFS (the KH collection's Program 1 mounts Program 0's SettingMenu.hed as rom0:).
+// DM_ROMFS_<index> overrides the current program's DM_ROMFS path; an unset index falls back to DM_ROMFS for single-program titles and Program 0.
+HLE_FORCE("_ZN2nn2fs8MountRomEPKciPvm", "RomFS program-index overload → DM_ROMFS_<index>, falling back to the current program's DM_ROMFS", Result, h_fs_MountRomIndex, const char *name, int index, void *cache, size_t sz) {
+    char key[40]; snprintf(key, sizeof key, "DM_ROMFS_%d", index);
+    const char *dir = getenv(key);
+    if (!dir || !*dir) return h_fs_MountRom(name, cache, sz);
+    if (g_flag.fs) LOG("fs MountRom program index %d: %s → %s", index, name, dir);
+    return mount_rom_from_env(name, key, cache, sz);
+}
+
 // The owned index list is reported by the aoc calls in hle_misc.c from the same directory; the game only mounts indices it was given, and a missing directory answers "target not found" (fs 2-1002, as on hardware without that DLC)
 #define RES_TARGET_NOT_FOUND 0x7D402u   // fs module 2, description 1002
 // The cache a Query…CacheSize asks for is, on Horizon, the RomFS's file table as RomFsFileSystem::GetRequiredWorkingMemorySize sizes it: the directory and file hash tables (4 bytes a bucket)

@@ -1,0 +1,37 @@
+# Kingdom Hearts collection: observed build, see README.md for verification limits.
+# ---- Identity ----
+title_id	010090C022978001
+program_id	010090C022978001
+
+# ---- App ----
+name	KINGDOM HEARTS - HD 1.5+2.5 ReMIX -
+ipa	KingdomHeartsHd1525ReMIX.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=badf2faf580b712464365c4d529d92c9	subsdk1=99e21f98a397434b534c1459fc38a2b8	sdk=bc204aae7319bab274894f1cc3f5da92
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# not loaded, main takes nothing from them the host does not supply: subsdk0 (NintendoSDK_Vulkan)
+modules	main subsdk1 sdk
+romfs_marker	kh1_second.pkg
+zip_store	.mp4:.pkg:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split ----
+shader_groups	/Switch/=switch
+shader_note	KINGDOM HEARTS - HD 1.5+2.5 ReMIX - shaders (provisional profile)
+
+# ---- After rewrite (Mac bring-up) ----
+# rewritten Program 1 modules exceed the default 64 MiB memory reserve
+mem_used	0x4a00000

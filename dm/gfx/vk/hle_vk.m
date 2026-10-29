@@ -23,6 +23,7 @@
 #include <mach-o/getsect.h>
 #include <mach-o/ldsyms.h>
 #include <math.h>
+#include <stdlib.h>
 #include <stdatomic.h>
 #include <time.h>
 
@@ -170,6 +171,66 @@ static void dev_init_once(void) {
     }
 }
 static void dev_init(void) { static pthread_once_t once = PTHREAD_ONCE_INIT; pthread_once(&once, dev_init_once); }
+static pthread_mutex_t g_test_fs_mu = PTHREAD_MUTEX_INITIALIZER;
+static __strong id<MTLLibrary> g_test_fs_lib;
+static __strong id<MTLFunction> g_test_fs_fn, g_test_fs_uv_fn, g_test_fs_tex_fn, g_test_fs_col_fn, g_test_fs_alpha_fn;
+static __strong id<MTLFunction> g_test_fs_movie_fn, g_test_fs_movie_uv_fn, g_test_fs_movie_tex_fn, g_test_fs_movie_col_fn, g_test_fs_movie_alpha_fn;
+static __strong id<MTLFunction> g_test_fs_sample_fn, g_test_fs_sample_uv_fn, g_test_fs_sample_tex_fn;
+static int g_test_fs_attempted;
+static id<MTLFunction> test_fragment(const char *key, const char *mode) {
+    pthread_mutex_lock(&g_test_fs_mu);
+    if (!g_test_fs_attempted) {
+        g_test_fs_attempted = 1;
+        NSString *src = @"#include <metal_stdlib>\nusing namespace metal;\n"
+            "struct dm_vk_stage_in { float2 tex [[user(locn0)]]; float4 col [[user(locn1)]]; float fog [[user(locn2)]]; };\n"
+            "fragment float4 dm_vk_test_solid() { return float4(1.0, 0.0, 1.0, 1.0); }\n"
+            "fragment float4 dm_vk_test_uv(dm_vk_stage_in in [[stage_in]]) { return float4(in.tex.x, in.tex.y, in.fog, 1.0); }\n"
+            "fragment float4 dm_vk_test_col(dm_vk_stage_in in [[stage_in]]) { return float4(in.col.rgb, 1.0); }\n"
+            "fragment float4 dm_vk_test_alpha(dm_vk_stage_in in [[stage_in]]) { return float4(in.col.aaa, 1.0); }\n"
+            "fragment float4 dm_vk_test_tex(dm_vk_stage_in in [[stage_in]], texture2d<float> txDiffuse [[texture(0)]], sampler samLinear [[sampler(0)]]) { return txDiffuse.sample(samLinear, in.tex); }\n"
+            "struct dm_vk_movie_stage_in { float2 tex [[user(locn0)]]; float4 col [[user(locn1)]]; };\n"
+            "fragment float4 dm_vk_movie_solid() { return float4(1.0, 0.0, 1.0, 1.0); }\n"
+            "fragment float4 dm_vk_movie_uv(dm_vk_movie_stage_in in [[stage_in]]) { return float4(in.tex.x, in.tex.y, 0.0, 1.0); }\n"
+            "fragment float4 dm_vk_movie_col(dm_vk_movie_stage_in in [[stage_in]]) { return float4(in.col.rgb, 1.0); }\n"
+            "fragment float4 dm_vk_movie_alpha(dm_vk_movie_stage_in in [[stage_in]]) { return float4(in.col.aaa, 1.0); }\n"
+            "fragment float4 dm_vk_movie_tex(dm_vk_movie_stage_in in [[stage_in]], texture2d<float> txDiffuse [[texture(0)]], sampler samLinear [[sampler(0)]]) { float4 c = txDiffuse.sample(samLinear, in.tex); return float4(c.rgb, 1.0); }\n"
+            "struct dm_vk_sample_stage_in { float2 tex [[user(locn0)]]; };\n"
+            "fragment float4 dm_vk_sample_solid() { return float4(1.0, 0.0, 1.0, 1.0); }\n"
+            "fragment float4 dm_vk_sample_uv(dm_vk_sample_stage_in in [[stage_in]]) { return float4(in.tex.x, in.tex.y, 0.0, 1.0); }\n"
+            "fragment float4 dm_vk_sample_tex(dm_vk_sample_stage_in in [[stage_in]], texture2d<float> txDiffuse [[texture(0)]], sampler samLinear [[sampler(0)]]) { float4 c = txDiffuse.sample(samLinear, in.tex); return float4(c.rgb, 1.0); }\n";
+        NSError *err = nil;
+        g_test_fs_lib = [g_dev newLibraryWithSource:src options:nil error:&err];
+        if (g_test_fs_lib) {
+            g_test_fs_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_test_solid"];
+            g_test_fs_uv_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_test_uv"];
+            g_test_fs_col_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_test_col"];
+            g_test_fs_alpha_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_test_alpha"];
+            g_test_fs_tex_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_test_tex"];
+            g_test_fs_movie_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_movie_solid"];
+            g_test_fs_movie_uv_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_movie_uv"];
+            g_test_fs_movie_col_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_movie_col"];
+            g_test_fs_movie_alpha_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_movie_alpha"];
+            g_test_fs_movie_tex_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_movie_tex"];
+            g_test_fs_sample_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_sample_solid"];
+            g_test_fs_sample_uv_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_sample_uv"];
+            g_test_fs_sample_tex_fn = [g_test_fs_lib newFunctionWithName:@"dm_vk_sample_tex"];
+        }
+        if (!g_test_fs_fn) { const char *msg = err.localizedDescription.UTF8String; LOG("[vk] [RED] DM_VK_TEST_FS compile failed: %s", msg ? msg : "function not found"); }
+    }
+    int sample = key && !strcmp(key, "56b0d661b62f3912");
+    int movie = key && !strcmp(key, "8061129a84c22e46");
+    int kh_tex_override = key && !strcmp(key, "80a74ee192e6490b") && mode && !strcmp(mode, "tex");
+    id<MTLFunction> fn = sample ?
+        (mode && !strcmp(mode, "uv") ? g_test_fs_sample_uv_fn : mode && !strcmp(mode, "tex") ? g_test_fs_sample_tex_fn : g_test_fs_sample_fn) : movie ?
+        (mode && !strcmp(mode, "uv") ? g_test_fs_movie_uv_fn : mode && !strcmp(mode, "tex") ? g_test_fs_movie_tex_fn :
+         mode && !strcmp(mode, "col") ? g_test_fs_movie_col_fn : mode && !strcmp(mode, "alpha") ? g_test_fs_movie_alpha_fn : g_test_fs_movie_fn) :
+        kh_tex_override ? g_test_fs_sample_tex_fn :
+        (mode && !strcmp(mode, "uv") ? g_test_fs_uv_fn : mode && !strcmp(mode, "tex") ? g_test_fs_tex_fn :
+         mode && !strcmp(mode, "col") ? g_test_fs_col_fn : mode && !strcmp(mode, "alpha") ? g_test_fs_alpha_fn : g_test_fs_fn);
+    if (!fn) LOG("[vk] [RED] DM_VK_TEST_FS requested mode %s is unavailable", mode ? mode : "solid");
+    pthread_mutex_unlock(&g_test_fs_mu);
+    return fn;
+}
 
 // ---------- Objects ----------
 // Dispatchable handles: their first word is where a loader keeps its dispatch table
@@ -218,7 +279,10 @@ struct VkPipeline_T {
     const shinfo *vs, *fs; uint32_t vb_mask; VkPipelineLayout layout;
     MTLPrimitiveType prim; MTLCullMode cull; MTLWinding wind; MTLTriangleFillMode fill; MTLDepthClipMode clip;
     int bias; float bias_c, bias_s, bias_cl; float blend[4]; uint32_t sref_f, sref_b;
-    int dyn_vp, dyn_sc, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
+    uint32_t diag_blend_enable, diag_src_rgb, diag_dst_rgb, diag_rgb_op;
+    uint32_t diag_src_alpha, diag_dst_alpha, diag_alpha_op, diag_write_mask;
+    uint32_t diag_depth_test, diag_depth_op, diag_depth_write, diag_stencil_test;
+    int dyn_vp, dyn_sc, dyn_blend, dyn_sref, has_vp, has_sc; MTLViewport vp; VkRect2D sc;
 };
 struct VkCommandPool_T { struct VkCommandBuffer_T *cbs; };
 struct VkCommandBuffer_T { void *loader; VkCommandPool pool; struct VkCommandBuffer_T *prev, *next; uint8_t *buf; size_t n, cap; };
@@ -857,7 +921,14 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
                     if (!m->tried_d) { m->tried_d = 1; m->fn_d = [g_lib newFunctionWithName:[NSString stringWithFormat:@"vk_%s_d", m->key]]; }
                     pthread_mutex_unlock(&mu);
                 }
-                pd.fragmentFunction = dual && m->fn_d ? m->fn_d : m->fn; p->fs = m->si;
+                const char *test_key = getenv("DM_VK_TEST_FS_KEY");
+                const char *test_mode = getenv("DM_VK_TEST_FS_MODE");
+                id<MTLFunction> test_fn = !dual && test_key && !strcmp(test_key, m->key) ? test_fragment(m->key, test_mode) : nil;
+                if (test_fn) {
+                    pd.fragmentFunction = test_fn;
+                    VLOG("[vk] diagnostic fragment override for %s mode=%s", m->key, test_mode ? test_mode : "solid");
+                } else pd.fragmentFunction = dual && m->fn_d ? m->fn_d : m->fn;
+                p->fs = m->si;
             }
             else RED1("shader stage %#x not implemented", st->stage);
             strlcat(keys, s ? " " : "", sizeof keys); strlcat(keys, m->key, sizeof keys);
@@ -881,6 +952,25 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             else { l.stride = 16; l.stepFunction = MTLVertexStepFunctionConstant; l.stepRate = 0; }
             p->vb_mask |= 1u << b->binding;
         }
+        const char *attr_trace = getenv("DM_VK_ATTRTRACE");
+        int trace_attrs = attr_trace && p->vs &&
+            (!strcmp(p->vs->key, "4c1e2f47738ed1ba") || !strcmp(p->vs->key, "d7a52a49f521f4f0") ||
+             !strcmp(p->vs->key, "8cca46c2723c962d") || !strcmp(p->vs->key, "5715f513ed87a8a9"));
+        if (trace_attrs) {
+            VLOG("[ATTRTRACE] vs=%s attributes=%u bindings=%u", p->vs->key,
+                 vi ? vi->vertexAttributeDescriptionCount : 0, vi ? vi->vertexBindingDescriptionCount : 0);
+            for (uint32_t i = 0; vi && i < vi->vertexAttributeDescriptionCount; i++) {
+                const VkVertexInputAttributeDescription *at = &vi->pVertexAttributeDescriptions[i]; const fmt_t *f = fmt_of(at->format);
+                VLOG("[ATTRTRACE] vs=%s loc=%u binding=%u format=%u metalFormat=%ld offset=%u",
+                     p->vs->key, at->location, at->binding, (unsigned)at->format,
+                     (long)(f ? f->vf : MTLVertexFormatInvalid), at->offset);
+            }
+            for (uint32_t i = 0; vi && i < vi->vertexBindingDescriptionCount; i++) {
+                const VkVertexInputBindingDescription *b = &vi->pVertexBindingDescriptions[i];
+                VLOG("[ATTRTRACE] vs=%s binding=%u stride=%u inputRate=%u",
+                     p->vs->key, b->binding, b->stride, b->inputRate);
+            }
+        }
         pd.vertexDescriptor = vd;
         switch (ci->pInputAssemblyState ? ci->pInputAssemblyState->topology : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
             case VK_PRIMITIVE_TOPOLOGY_POINT_LIST: p->prim = MTLPrimitiveTypePoint; pd.inputPrimitiveTopology = MTLPrimitiveTopologyClassPoint; break;
@@ -891,7 +981,9 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             default: RED1("primitive topology %d not implemented", ci->pInputAssemblyState->topology); p->prim = MTLPrimitiveTypeTriangle; break;
         }
         const VkPipelineRasterizationStateCreateInfo *rs = ci->pRasterizationState;
+        int probe_vs = p->vs && (strcmp(p->vs->key, "4c1e2f47738ed1ba") == 0 || strcmp(p->vs->key, "8cca46c2723c962d") == 0 || strcmp(p->vs->key, "d7a52a49f521f4f0") == 0);
         p->cull = !rs || rs->cullMode == VK_CULL_MODE_NONE ? MTLCullModeNone : rs->cullMode == VK_CULL_MODE_FRONT_BIT ? MTLCullModeFront : rs->cullMode == VK_CULL_MODE_BACK_BIT ? MTLCullModeBack : MTLCullModeNone;
+        if (probe_vs && getenv("DM_VK_PROBE_NOCULL")) { p->cull = MTLCullModeNone; VLOG("[probe] culling disabled for %s", p->vs->key); }
         if (rs && rs->cullMode == VK_CULL_MODE_FRONT_AND_BACK) RED1("culling both front and back faces not implemented");
         p->wind = rs && rs->frontFace == VK_FRONT_FACE_CLOCKWISE ? MTLWindingClockwise : MTLWindingCounterClockwise;   // framebuffer winding is the same once the shaders flip y
         p->fill = rs && rs->polygonMode == VK_POLYGON_MODE_LINE ? MTLTriangleFillModeLines : MTLTriangleFillModeFill;
@@ -910,6 +1002,12 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
             ca.pixelFormat = f ? f->pf : MTLPixelFormatInvalid;
             if (cb && i < cb->attachmentCount) {
                 const VkPipelineColorBlendAttachmentState *b = &cb->pAttachments[cb->attachmentCount > 1 ? i : 0];
+                if (i == 0) {
+                    p->diag_blend_enable = b->blendEnable;
+                    p->diag_src_rgb = b->srcColorBlendFactor; p->diag_dst_rgb = b->dstColorBlendFactor; p->diag_rgb_op = b->colorBlendOp;
+                    p->diag_src_alpha = b->srcAlphaBlendFactor; p->diag_dst_alpha = b->dstAlphaBlendFactor; p->diag_alpha_op = b->alphaBlendOp;
+                    p->diag_write_mask = b->colorWriteMask;
+                }
                 ca.writeMask = write_mask(b->colorWriteMask);
                 if (b->blendEnable && f && f->kind == K_COLOR) {
                     ca.blendingEnabled = YES;
@@ -923,9 +1021,11 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         if (fmt_has_depth(df)) pd.depthAttachmentPixelFormat = df->pf;
         if (fmt_has_stencil(df)) pd.stencilAttachmentPixelFormat = df->pf;
         const VkPipelineDepthStencilStateCreateInfo *ds = ci->pDepthStencilState;
+        if (ds) { p->diag_depth_test = ds->depthTestEnable; p->diag_depth_op = ds->depthCompareOp; p->diag_depth_write = ds->depthWriteEnable; p->diag_stencil_test = ds->stencilTestEnable; }
         if (df && ds) {
             MTLDepthStencilDescriptor *dd = [MTLDepthStencilDescriptor new];
             if (fmt_has_depth(df) && ds->depthTestEnable) { dd.depthCompareFunction = (MTLCompareFunction)ds->depthCompareOp; dd.depthWriteEnabled = ds->depthWriteEnable != 0; }
+            if (probe_vs && getenv("DM_VK_PROBE_NODEPTH")) { dd.depthCompareFunction = MTLCompareFunctionAlways; VLOG("[probe] depth comparison disabled for %s", p->vs->key); }
             if (fmt_has_stencil(df) && ds->stencilTestEnable) { dd.frontFaceStencil = stencil_d(&ds->front); dd.backFaceStencil = stencil_d(&ds->back); p->sref_f = ds->front.reference; p->sref_b = ds->back.reference; }
             if (ds->depthBoundsTestEnable) RED1("depth bounds test not implemented");
             p->dss = [g_dev newDepthStencilStateWithDescriptor:dd];
@@ -933,7 +1033,11 @@ static VkPipeline pipe_make(const VkGraphicsPipelineCreateInfo *ci) {
         const VkPipelineDynamicStateCreateInfo *dy = ci->pDynamicState;
         for (uint32_t i = 0; dy && i < dy->dynamicStateCount; i++) {
             VkDynamicState s = dy->pDynamicStates[i];
-            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1; else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1; else RED1("dynamic state %d not implemented (the imports have no matching set function)", s);
+            if (s == VK_DYNAMIC_STATE_VIEWPORT) p->dyn_vp = 1;
+            else if (s == VK_DYNAMIC_STATE_SCISSOR) p->dyn_sc = 1;
+            else if (s == VK_DYNAMIC_STATE_BLEND_CONSTANTS) p->dyn_blend = 1;
+            else if (s == VK_DYNAMIC_STATE_STENCIL_REFERENCE) p->dyn_sref = 1;
+            else RED1("dynamic state %d not implemented", s);
         }
         const VkPipelineViewportStateCreateInfo *vs = ci->pViewportState;
         if (!p->dyn_vp && vs && vs->pViewports && vs->viewportCount) { p->vp = vp_of(&vs->pViewports[0]); p->has_vp = 1; }
@@ -953,7 +1057,7 @@ VKB(vkCreateGraphicsPipelines, VkResult, VkDevice d, VkPipelineCache c, uint32_t
 VKB(vkDestroyPipeline, void, VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d; (void)a; if (p) { p->pso = nil; p->dss = nil; free(p); } }
 
 // ---------- Command buffers: recording ----------
-enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND };
+enum { C_BRP = 1, C_ERP, C_PIPE, C_SETS, C_VB, C_IB, C_VP, C_SC, C_DRAWI, C_COPYB, C_COPYB2I, C_DRAW, C_PUSH, C_COPYI, C_COPYI2B, C_QRESET, C_QTS, C_QBEGIN, C_QEND, C_RESOLVE, C_BLEND, C_SREF, C_CLEAR };
 typedef struct { uint32_t op, size; } chdr;
 typedef struct { VkRenderPass rp; VkFramebuffer fb; VkRect2D area; uint32_t nclear; VkClearValue clear[]; } c_brp;
 typedef struct { VkPipeline p; } c_pipe;
@@ -969,6 +1073,10 @@ typedef struct { uint32_t count, inst, first, first_inst; } c_draw;
 typedef struct { uint32_t off, size; uint8_t data[]; } c_push;
 typedef struct { VkImage src, dst; uint32_t n; VkImageCopy r[]; } c_copyi;
 typedef struct { VkImage src; VkBuffer dst; uint32_t n; VkBufferImageCopy r[]; } c_copyi2b;
+typedef struct { VkImage src, dst; uint32_t n; VkImageResolve r[]; } c_resolve;
+typedef struct { float v[4]; } c_blend;
+typedef struct { VkStencilFaceFlags face; uint32_t ref; } c_sref;
+typedef struct { uint32_t na, nr; VkClearAttachment a[]; } c_clear;
 typedef struct { VkQueryPool q; uint32_t first, n; } c_query;
 static void *rec(VkCommandBuffer cb, uint32_t op, size_t sz) {
     size_t need = (sizeof(chdr) + sz + 7) & ~(size_t)7;
@@ -1011,6 +1119,15 @@ VK(vkCmdBeginRenderPass, void, VkCommandBuffer cb, const VkRenderPassBeginInfo *
     if (nc) memcpy(c->clear, bi->pClearValues, nc * sizeof(VkClearValue));
 }
 VK(vkCmdEndRenderPass, void, VkCommandBuffer cb) { rec(cb, C_ERP, 0); }
+VK(vkCmdClearAttachments, void, VkCommandBuffer cb, uint32_t na, const VkClearAttachment *a, uint32_t nr, const VkClearRect *r) {
+    c_clear *c = rec(cb, C_CLEAR, sizeof *c + na * sizeof *a + nr * sizeof *r); c->na = na; c->nr = nr;
+    if (na) memcpy(c->a, a, na * sizeof *a);
+    if (nr) memcpy((uint8_t *)c->a + na * sizeof *a, r, nr * sizeof *r);
+}
+VK(vkCmdResolveImage, void, VkCommandBuffer cb, VkImage src, VkImageLayout sl, VkImage dst, VkImageLayout dl, uint32_t n, const VkImageResolve *r) {
+    (void)sl; (void)dl;
+    c_resolve *c = rec(cb, C_RESOLVE, sizeof *c + n * sizeof *r); c->src = src; c->dst = dst; c->n = n; memcpy(c->r, r, n * sizeof *r);
+}
 VK(vkCmdBindPipeline, void, VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeline p) {
     if (bp != VK_PIPELINE_BIND_POINT_GRAPHICS) { RED1("compute pipelines not implemented"); return; }
     ((c_pipe *)rec(cb, C_PIPE, sizeof(c_pipe)))->p = p;
@@ -1027,6 +1144,8 @@ VK(vkCmdBindVertexBuffers, void, VkCommandBuffer cb, uint32_t first, uint32_t n,
 VK(vkCmdBindIndexBuffer, void, VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkIndexType t) { c_ib *c = rec(cb, C_IB, sizeof *c); c->b = b; c->o = o; c->t = t; }
 VK(vkCmdSetViewport, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkViewport *v) { if (!first && n) ((c_vp *)rec(cb, C_VP, sizeof(c_vp)))->v = v[0]; }
 VK(vkCmdSetScissor, void, VkCommandBuffer cb, uint32_t first, uint32_t n, const VkRect2D *r) { if (!first && n) ((c_sc *)rec(cb, C_SC, sizeof(c_sc)))->r = r[0]; }
+VK(vkCmdSetBlendConstants, void, VkCommandBuffer cb, const float *v) { c_blend *c = rec(cb, C_BLEND, sizeof *c); memcpy(c->v, v, sizeof c->v); }
+VK(vkCmdSetStencilReference, void, VkCommandBuffer cb, VkStencilFaceFlags face, uint32_t ref) { *(c_sref *)rec(cb, C_SREF, sizeof(c_sref)) = (c_sref){face, ref}; }
 VK(vkCmdDrawIndexed, void, VkCommandBuffer cb, uint32_t count, uint32_t inst, uint32_t first, int32_t voff, uint32_t first_inst) {
     *(c_drawi *)rec(cb, C_DRAWI, sizeof(c_drawi)) = (c_drawi){count, inst, first, voff, first_inst};
 }
@@ -1072,6 +1191,7 @@ typedef struct {
     VkBuffer vb[14]; VkDeviceSize vbo[14];
     VkBuffer ib; VkDeviceSize ibo; MTLIndexType it; uint32_t isz;
     VkViewport vp; VkRect2D sc; int have_vp, have_sc, vp_dirty, sc_dirty;
+    float dyn_blend[4]; uint32_t dyn_sref_f, dyn_sref_b;
     uint8_t pc[256];
     subq_t *sq;
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
@@ -1146,6 +1266,76 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     s->vp_dirty = s->sc_dirty = 1;
     g_n_pass++;
 }
+static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t *e, VkDeviceSize off, int frag) {
+    static int enabled = -1, min_init;
+    static uint64_t min_submit, last_submit[13];
+    static unsigned logged[13];
+    if (enabled < 0) enabled = getenv("DM_VK_UBOTRACE") != NULL;
+    if (!min_init) { const char *v = getenv("DM_VK_UBOTRACE_MIN_SUBMIT"); min_submit = v ? strtoull(v, NULL, 10) : 0; min_init = 1; }
+    if (!enabled || r->kind != 'u' || r->set != 0 || !s->sq || s->sq->v < min_submit || s->sq->v > min_submit + 64) return;
+    int id = -1; size_t need = 0;
+    if (frag && !strcmp(si->key, "a552cfafcf3c0899") && r->binding == 6) { id = 10; need = 80; }
+    else if (frag && !strcmp(si->key, "8061129a84c22e46") && r->binding == 6) { id = 12; need = 112; }
+    else if (!frag && !strcmp(si->key, "5715f513ed87a8a9") && r->binding == 2) { id = 11; need = 144; }
+    else if (!frag && (!strcmp(si->key, "4c1e2f47738ed1ba") || !strcmp(si->key, "d7a52a49f521f4f0") || !strcmp(si->key, "8cca46c2723c962d"))) {
+        int base = !strcmp(si->key, "4c1e2f47738ed1ba") ? 0 : !strcmp(si->key, "d7a52a49f521f4f0") ? 3 : 6;
+        if (r->binding == 2) { id = base; need = 144; }
+        else if (r->binding == 3) { id = base + 1; need = 448; }
+        else if (r->binding == 4) { id = base + 2; need = 64; }
+    } else if (!frag && !strcmp(si->key, "4224d4542e2f8e20") && r->binding == 2) { id = 9; need = 64; }
+    if (id < 0 || logged[id] >= 8 || last_submit[id] == s->sq->v || !e->buf || !e->buf.contents) return;
+    if (off > e->buf.length || need > e->buf.length - (NSUInteger)off) return;
+    const uint8_t *b = (const uint8_t *)e->buf.contents + (NSUInteger)off;
+    if (id == 0 || id == 3 || id == 6) {
+        float safe, xz, xw, fill, px, py, mx, my, vp[4]; uint32_t fog;
+        memcpy(&px, b, 4); memcpy(&py, b + 4, 4); memcpy(&xz, b + 24, 4); memcpy(&xw, b + 28, 4);
+        memcpy(&mx, b + 32, 4); memcpy(&my, b + 36, 4); memcpy(&safe, b + 48, 4);
+        memcpy(&fog, b + 52, 4); memcpy(&fill, b + 60, 4);
+        memcpy(&vp[0], b + 80, 4); memcpy(&vp[1], b + 100, 4); memcpy(&vp[2], b + 120, 4); memcpy(&vp[3], b + 140, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s binding=%u slot=%u Projection2D.xy=%.6g,%.6g MagicScale.xy=%.6g,%.6g SafeScale=%.6g FogEnable=%u FillScale=%.6g xyOffset.zw=%.6g,%.6g VPdiag=%.6g,%.6g,%.6g,%.6g",
+             (unsigned long long)s->sq->v, si->key, r->binding, r->slot, px, py, mx, my, safe, fog, fill, xz, xw, vp[0], vp[1], vp[2], vp[3]);
+    } else if (id == 9) {
+        float fill; memcpy(&fill, b + 60, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s binding=%u slot=%u fullscreen FillScale=%.6g",
+             (unsigned long long)s->sq->v, si->key, r->binding, r->slot, fill);
+    } else if (id == 11) {
+        float proj[4], xy[4], magic[4], safe, fill, color, alpha, tpage[2], vp[4]; uint32_t fog;
+        memcpy(proj, b, 16); memcpy(xy, b + 16, 16); memcpy(magic, b + 32, 16);
+        memcpy(&safe, b + 48, 4); memcpy(&fog, b + 52, 4); memcpy(&fill, b + 60, 4);
+        memcpy(&color, b + 64, 4); memcpy(&alpha, b + 68, 4); memcpy(tpage, b + 72, 8);
+        memcpy(&vp[0], b + 80, 4); memcpy(&vp[1], b + 100, 4); memcpy(&vp[2], b + 120, 4); memcpy(&vp[3], b + 140, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s movieVS Projection2D=%.6g,%.6g,%.6g,%.6g xyOffset=%.6g,%.6g,%.6g,%.6g MagicScale=%.6g,%.6g,%.6g,%.6g SafeScale=%.6g FogEnable=%u FillScale=%.6g colorScale=%.6g alphaScale=%.6g TPage=%.6g,%.6g VPdiag=%.6g,%.6g,%.6g,%.6g",
+             (unsigned long long)s->sq->v, si->key, proj[0], proj[1], proj[2], proj[3], xy[0], xy[1], xy[2], xy[3], magic[0], magic[1], magic[2], magic[3], safe, fog, fill, color, alpha, tpage[0], tpage[1], vp[0], vp[1], vp[2], vp[3]);
+    } else if (id == 1 || id == 4 || id == 7) {
+        float texscale[4], fog[2], ambient[4], param0[4], param1[4], proj[4];
+        memcpy(texscale, b, 16); memcpy(ambient, b + 16, 16); memcpy(fog, b + 32, 8);
+        memcpy(param0, b + 48, 16); memcpy(param1, b + 64, 16);
+        memcpy(&proj[0], b + 384, 4); memcpy(&proj[1], b + 404, 4); memcpy(&proj[2], b + 424, 4); memcpy(&proj[3], b + 444, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s binding=%u slot=%u TexScale=%.6g,%.6g,%.6g,%.6g Ambient=%.6g,%.6g,%.6g,%.6g FogParam.xy=%.6g,%.6g Param0=%.6g,%.6g,%.6g,%.6g Param1=%.6g,%.6g,%.6g,%.6g LocalProjection0diag=%.6g,%.6g,%.6g,%.6g",
+             (unsigned long long)s->sq->v, si->key, r->binding, r->slot, texscale[0], texscale[1], texscale[2], texscale[3], ambient[0], ambient[1], ambient[2], ambient[3], fog[0], fog[1], param0[0], param0[1], param0[2], param0[3], param1[0], param1[1], param1[2], param1[3], proj[0], proj[1], proj[2], proj[3]);
+    } else if (id == 2 || id == 5 || id == 8) {
+        float world[4]; memcpy(&world[0], b, 4); memcpy(&world[1], b + 20, 4); memcpy(&world[2], b + 40, 4); memcpy(&world[3], b + 60, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s binding=%u slot=%u WorldViewdiag=%.6g,%.6g,%.6g,%.6g",
+             (unsigned long long)s->sq->v, si->key, r->binding, r->slot, world[0], world[1], world[2], world[3]);
+    } else if (id == 12) {
+        float region_u[4], region_v[4], alpha_ref, multi_alpha, ext_alpha, fog[3], inv_gamma; uint32_t flags, cvt, cvsev;
+        memcpy(region_u, b, 16); memcpy(region_v, b + 16, 16);
+        memcpy(&alpha_ref, b + 32, 4); memcpy(&flags, b + 36, 4);
+        memcpy(&multi_alpha, b + 40, 4); memcpy(&ext_alpha, b + 44, 4);
+        memcpy(fog, b + 48, 12); memcpy(&inv_gamma, b + 60, 4);
+        memcpy(&cvt, b + 64, 4); memcpy(&cvsev, b + 68, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s movieFS RegionU=%.6g,%.6g,%.6g,%.6g RegionV=%.6g,%.6g,%.6g,%.6g flags=%#x alphaRef=%.6g multiAlpha=%.6g extAlpha=%.6g FogColor=%.6g,%.6g,%.6g inverseGamma=%.6g colorVision=%u/%u",
+             (unsigned long long)s->sq->v, si->key, region_u[0], region_u[1], region_u[2], region_u[3], region_v[0], region_v[1], region_v[2], region_v[3], flags, alpha_ref, multi_alpha, ext_alpha, fog[0], fog[1], fog[2], inv_gamma, cvt, cvsev);
+    } else {
+        float alpha_ref, fog[3], inv_gamma; uint32_t flags, cvt, cvsev;
+        memcpy(&alpha_ref, b + 32, 4); memcpy(&flags, b + 36, 4);
+        memcpy(fog, b + 48, 12); memcpy(&inv_gamma, b + 60, 4);
+        memcpy(&cvt, b + 64, 4); memcpy(&cvsev, b + 68, 4);
+        VLOG("[UBOTRACE] submit=%llu key=%s FS flags=%#x alphaRef=%.6g FogColor=%.6g,%.6g,%.6g inverseGamma=%.6g colorVision=%u/%u",
+             (unsigned long long)s->sq->v, si->key, flags, alpha_ref, fog[0], fog[1], fog[2], inv_gamma, cvt, cvsev);
+    }
+    last_submit[id] = s->sq->v; logged[id]++;
+}
 static void bind_res(rs_t *s, const shinfo *si, int frag) {
     if (!si) return;
     id<MTLRenderCommandEncoder> re = s->re;
@@ -1170,6 +1360,7 @@ static void bind_res(rs_t *s, const shinfo *si, int frag) {
                 case 'u': case 'b': {
                     if (!e->buf) { RED1("shader %s: buffer %u.%u[%u] is empty", si->key, r->set, r->binding, k); break; }
                     VkDeviceSize off = e->off; if (lb->dyn >= 0 && lb->dyn + k < 16) off += s->set[r->set].dyn[lb->dyn + k];
+                    if (k == 0) vk_trace_ubo(s, si, r, e, off, frag);
                     if (frag) [re setFragmentBuffer:e->buf offset:off atIndex:slot]; else [re setVertexBuffer:e->buf offset:off atIndex:slot];
                     break;
                 }
@@ -1195,17 +1386,92 @@ static void bind_push(rs_t *s, const shinfo *si, int frag) {   // the push-const
         if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
     }
 }
+static _Atomic uint64_t g_frames;
 static int pre_draw(rs_t *s) {
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
     if (!re) { RED1("draw outside a render pass"); return 0; }
     if (!p || !p->pso) return 0;
+    static int vp_trace = -1, vp_seen, vp_min_init, vp_frame_init, vp_frame_mode;
+    static unsigned vp_logged;
+    static uint64_t vp_min_submit, vp_frame_start;
+    static uint32_t vp_last_w, vp_last_h;
+    static uint32_t vp_last_blend_enable, vp_last_src_rgb, vp_last_dst_rgb, vp_last_rgb_op;
+    static uint32_t vp_last_src_alpha, vp_last_dst_alpha, vp_last_alpha_op, vp_last_write_mask;
+    static int vp_trace_all = -1;
+    static MTLViewport vp_last;
+    static VkRect2D sc_last;
+    static char vp_last_vs[17], vp_last_fs[17];
+    if (vp_trace < 0) vp_trace = getenv("DM_VK_VPTRACE") != NULL;
+    if (vp_trace_all < 0) vp_trace_all = getenv("DM_VK_VPTRACE_ALL") != NULL;
+    if (!vp_frame_init) { const char *e = getenv("DM_VK_VPTRACE_FRAME"); vp_frame_mode = e != NULL; if (e) vp_frame_start = strtoull(e, NULL, 10); vp_frame_init = 1; }
+    if (!vp_min_init) { const char *e = getenv("DM_VK_VPTRACE_MIN_SUBMIT"); vp_min_submit = e ? strtoull(e, NULL, 10) : 0; vp_min_init = 1; }
+    uint64_t trace_frame = atomic_load_explicit(&g_frames, memory_order_relaxed);
+    int trace_active = vp_frame_mode ? trace_frame >= vp_frame_start && trace_frame - vp_frame_start <= 2 : s->sq && s->sq->v >= vp_min_submit && s->sq->v - vp_min_submit <= 64;
+    if (vp_trace && s->sq && trace_active && (vp_trace_all || (s->rt_w >= 640 && s->rt_h >= 360))) {
+        MTLViewport v = p->has_vp ? p->vp : vp_of(&s->vp);
+        VkRect2D r = p->has_sc ? p->sc : s->sc;
+        const char *vskey = p->vs ? p->vs->key : "-", *fskey = p->fs ? p->fs->key : "-";
+        uint64_t target_area = (uint64_t)s->rt_w * s->rt_h, scissor_area = (uint64_t)r.extent.width * r.extent.height;
+        int viewport_partial = fabs(v.originX) > 1.0 || fabs(v.originY) > 1.0 ||
+            fabs(fabs(v.width) - s->rt_w) > 1.0 || fabs(fabs(v.height) - s->rt_h) > 1.0;
+        int scissor_relevant = target_area && scissor_area * 100 >= target_area * 15;   // ignore small UI clipping rectangles
+        int changed = !vp_seen || vp_last_w != s->rt_w || vp_last_h != s->rt_h ||
+            fabs(vp_last.originX - v.originX) > 0.01 || fabs(vp_last.originY - v.originY) > 0.01 ||
+            fabs(vp_last.width - v.width) > 0.01 || fabs(vp_last.height - v.height) > 0.01 ||
+            fabs(vp_last.znear - v.znear) > 0.0001 || fabs(vp_last.zfar - v.zfar) > 0.0001 ||
+            sc_last.offset.x != r.offset.x || sc_last.offset.y != r.offset.y ||
+            sc_last.extent.width != r.extent.width || sc_last.extent.height != r.extent.height ||
+            p->diag_blend_enable != vp_last_blend_enable || p->diag_src_rgb != vp_last_src_rgb || p->diag_dst_rgb != vp_last_dst_rgb ||
+            p->diag_rgb_op != vp_last_rgb_op || p->diag_src_alpha != vp_last_src_alpha || p->diag_dst_alpha != vp_last_dst_alpha ||
+            p->diag_alpha_op != vp_last_alpha_op || p->diag_write_mask != vp_last_write_mask ||
+            strcmp(vp_last_vs, vskey) || strcmp(vp_last_fs, fskey);
+        if ((vp_trace_all || viewport_partial || scissor_relevant) && changed && vp_logged < 256) {
+            VLOG("[VPTRACE] frame=%llu submit=%llu target=%ux%u viewport=%.2f,%.2f %.2fx%.2f depth=%.3f..%.3f scissor=%d,%d %ux%u vs=%s fs=%s blend=%u rgb=%u/%u/%u alpha=%u/%u/%u mask=%#x static=%d/%d",
+                 (unsigned long long)trace_frame, (unsigned long long)s->sq->v, s->rt_w, s->rt_h,
+                 v.originX, v.originY, v.width, v.height, v.znear, v.zfar,
+                 r.offset.x, r.offset.y, r.extent.width, r.extent.height, vskey, fskey,
+                 p->diag_blend_enable, p->diag_src_rgb, p->diag_dst_rgb, p->diag_rgb_op,
+                 p->diag_src_alpha, p->diag_dst_alpha, p->diag_alpha_op, p->diag_write_mask, p->has_vp, p->has_sc);
+            id<MTLTexture> dest_tex = s->rpd.colorAttachments[0].texture;
+            VLOG("[VPTRACE]   dest_att0=%p", (__bridge void *)dest_tex);
+            MTLRenderPassDepthAttachmentDescriptor *dd = s->rpd.depthAttachment;
+            VLOG("[VPTRACE]   depth=%p format=%lu load=%lu store=%lu clear=%.6f test=%u op=%u write=%u stencil=%u", (__bridge void *)dd.texture, (unsigned long)dd.texture.pixelFormat, (unsigned long)dd.loadAction, (unsigned long)s->st_d, dd.clearDepth, p->diag_depth_test, p->diag_depth_op, p->diag_depth_write, p->diag_stencil_test);
+            if (p->fs) {
+                int tex_count = 0;
+                for (int i = 0; i < p->fs->nres && tex_count < 16; i++) {
+                    const shres *res = &p->fs->res[i];
+                    if (res->kind != 't' && res->kind != 'c') continue;
+                    VkDescriptorSet ds = res->set < 8 ? s->set[res->set].s : NULL;
+                    if (!ds) continue;
+                    const VkDescriptorSetLayout L = ds->L;
+                    int bi = res->binding < 128 ? L->idx[res->binding] : -1;
+                    if (bi < 0 || !L->b[bi].count) continue;
+                    const lbind *lb = &L->b[bi];
+                    uint32_t n = umin(res->count, lb->count);
+                    for (uint32_t k = 0; k < n && tex_count < 16; k++) {
+                        const desc_t *e = &ds->d[lb->base + k];
+                        if (!e->tex) continue;
+                        VLOG("[VPTRACE]   fs_src_tex[%d]=%p size=%lux%lu kind=%c set=%u binding=%u idx=%u", tex_count, (__bridge void *)e->tex, (unsigned long)e->tex.width, (unsigned long)e->tex.height, res->kind, res->set, res->binding, k);
+                        tex_count++;
+                    }
+                }
+            }
+            vp_last = v; sc_last = r; vp_last_w = s->rt_w; vp_last_h = s->rt_h;
+            vp_last_blend_enable = p->diag_blend_enable; vp_last_src_rgb = p->diag_src_rgb; vp_last_dst_rgb = p->diag_dst_rgb;
+            vp_last_rgb_op = p->diag_rgb_op; vp_last_src_alpha = p->diag_src_alpha; vp_last_dst_alpha = p->diag_dst_alpha;
+            vp_last_alpha_op = p->diag_alpha_op; vp_last_write_mask = p->diag_write_mask;
+            strlcpy(vp_last_vs, vskey, sizeof vp_last_vs); strlcpy(vp_last_fs, fskey, sizeof vp_last_fs);
+            vp_seen = 1; vp_logged++;
+        }
+    }
     if (s->applied != p) {
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
-        [re setBlendColorRed:p->blend[0] green:p->blend[1] blue:p->blend[2] alpha:p->blend[3]];
-        [re setStencilFrontReferenceValue:p->sref_f backReferenceValue:p->sref_b];
+        const float *bc = p->dyn_blend ? s->dyn_blend : p->blend;
+        [re setBlendColorRed:bc[0] green:bc[1] blue:bc[2] alpha:bc[3]];
+        [re setStencilFrontReferenceValue:p->dyn_sref ? s->dyn_sref_f : p->sref_f backReferenceValue:p->dyn_sref ? s->dyn_sref_b : p->sref_b];
         if (p->has_vp && (!s->applied || !s->applied->has_vp || memcmp(&s->applied->vp, &p->vp, sizeof p->vp))) s->vp_dirty = 1;
         if (p->has_sc) s->sc_dirty = 1;
         s->applied = p;
@@ -1232,6 +1498,16 @@ static int pre_draw(rs_t *s) {
         }
     return 1;
 }
+static int vk_copy_trace(rs_t *s, unsigned kind) {
+    static int enabled = -1, min_init;
+    static uint64_t min_submit;
+    static unsigned logged[4];
+    if (enabled < 0) enabled = getenv("DM_VK_COPYTRACE") != NULL;
+    if (!min_init) { const char *e = getenv("DM_VK_COPYTRACE_MIN_SUBMIT"); min_submit = e ? strtoull(e, NULL, 10) : 0; min_init = 1; }
+    if (!enabled || kind >= 4 || !s->sq || s->sq->v < min_submit || s->sq->v > min_submit + 64 || logged[kind] >= 12) return 0;
+    logged[kind]++;
+    return 1;
+}
 static void replay(rs_t *s, VkCommandBuffer cb) {
     for (size_t o = 0; o < cb->n;) {
         const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
@@ -1251,6 +1527,62 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             case C_IB: { const c_ib *x = c; s->ib = x->b; s->ibo = x->o; s->it = x->t == VK_INDEX_TYPE_UINT32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16; s->isz = x->t == VK_INDEX_TYPE_UINT32 ? 4 : 2; break; }
             case C_VP: s->vp = ((const c_vp *)c)->v; s->vp_dirty = 1; s->have_vp = 1; break;
             case C_SC: s->sc = ((const c_sc *)c)->r; s->sc_dirty = 1; s->have_sc = 1; break;
+            case C_CLEAR: {
+                const c_clear *x = c; const VkClearRect *rects = (const void *)((const uint8_t *)x->a + x->na * sizeof(VkClearAttachment));
+                static int clear_trace = -1; static unsigned clear_logged;
+                if (clear_trace < 0) clear_trace = getenv("DM_VK_CLEARTRACE") != NULL;
+                if (clear_trace && clear_logged++ < 32) {
+                    for (uint32_t j = 0; j < x->na; j++) VLOG("[CLEARTRACE] frame=%llu submit=%llu aspect=%#x depth=%g rects=%u", (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed), (unsigned long long)(s->sq ? s->sq->v : 0), x->a[j].aspectMask, x->a[j].clearValue.depthStencil.depth, x->nr);
+                }
+                if (!s->rpd) { RED1("vkCmdClearAttachments outside a render pass"); break; }
+                for (uint32_t ri = 0; ri < x->nr; ri++) {
+                    const VkClearRect *r = &rects[ri];
+                    if (r->rect.offset.x || r->rect.offset.y || r->rect.extent.width != s->rt_w || r->rect.extent.height != s->rt_h || r->baseArrayLayer || r->layerCount != 1) {
+                        RED1("partial/layered vkCmdClearAttachments not implemented: %d,%d %ux%u layers %u+%u", r->rect.offset.x, r->rect.offset.y, r->rect.extent.width, r->rect.extent.height, r->baseArrayLayer, r->layerCount); continue;
+                    }
+                    if (s->re) { end_rp(s, 0); s->cut = 1; }
+                    MTLRenderPassDescriptor *pd = s->rpd;
+                    for (uint32_t ai = 0; ai < x->na; ai++) {
+                        const VkClearAttachment *a = &x->a[ai];
+                        if (a->aspectMask & VK_IMAGE_ASPECT_COLOR_BIT) {
+                            if (a->colorAttachment >= 8 || !pd.colorAttachments[a->colorAttachment].texture) { RED1("clear color attachment %u is not active", a->colorAttachment); continue; }
+                            MTLRenderPassColorAttachmentDescriptor *ca = pd.colorAttachments[a->colorAttachment];
+                            ca.loadAction = MTLLoadActionClear; ca.clearColor = MTLClearColorMake(a->clearValue.color.float32[0], a->clearValue.color.float32[1], a->clearValue.color.float32[2], a->clearValue.color.float32[3]);
+                        }
+                        if (a->aspectMask & VK_IMAGE_ASPECT_DEPTH_BIT) {
+                            if (!pd.depthAttachment.texture) RED1("clear depth attachment is not active");
+                            else { pd.depthAttachment.loadAction = MTLLoadActionClear; pd.depthAttachment.clearDepth = a->clearValue.depthStencil.depth; }
+                        }
+                        if (a->aspectMask & VK_IMAGE_ASPECT_STENCIL_BIT) {
+                            if (!pd.stencilAttachment.texture) RED1("clear stencil attachment is not active");
+                            else { pd.stencilAttachment.loadAction = MTLLoadActionClear; pd.stencilAttachment.clearStencil = a->clearValue.depthStencil.stencil; }
+                        }
+                    }
+                    id<MTLRenderCommandEncoder> clear = [s->cb renderCommandEncoderWithDescriptor:pd];
+                    if (!clear) { RED1("Metal could not create a render encoder for vkCmdClearAttachments"); break; }
+                    for (int i = 0; i < 8; i++) if (pd.colorAttachments[i].texture) [clear setColorStoreAction:keep(s->st_col[i]) atIndex:i];
+                    if (pd.depthAttachment.texture) [clear setDepthStoreAction:MTLStoreActionStore];
+                    if (pd.stencilAttachment.texture) [clear setStencilStoreAction:MTLStoreActionStore];
+                    [clear endEncoding];
+                    for (int i = 0; i < 8; i++) if (pd.colorAttachments[i].texture) pd.colorAttachments[i].loadAction = MTLLoadActionLoad;
+                    if (pd.depthAttachment.texture) pd.depthAttachment.loadAction = MTLLoadActionLoad;
+                    if (pd.stencilAttachment.texture) pd.stencilAttachment.loadAction = MTLLoadActionLoad;
+                    s->cut = 1; s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
+                }
+                break;
+            }
+            case C_BLEND: {
+                const c_blend *x = c; memcpy(s->dyn_blend, x->v, sizeof s->dyn_blend);
+                if (s->re && s->pipe && s->pipe->dyn_blend) [s->re setBlendColorRed:x->v[0] green:x->v[1] blue:x->v[2] alpha:x->v[3]];
+                break;
+            }
+            case C_SREF: {
+                const c_sref *x = c;
+                if (x->face & VK_STENCIL_FACE_FRONT_BIT) s->dyn_sref_f = x->ref;
+                if (x->face & VK_STENCIL_FACE_BACK_BIT) s->dyn_sref_b = x->ref;
+                if (s->re && s->pipe && s->pipe->dyn_sref) [s->re setStencilFrontReferenceValue:s->dyn_sref_f backReferenceValue:s->dyn_sref_b];
+                break;
+            }
             case C_DRAWI: {
                 const c_drawi *x = c;
                 if (!x->count || !x->inst || !pre_draw(s)) break;
@@ -1274,6 +1606,10 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 id<MTLBlitCommandEncoder> be = blit(s, h->op); id<MTLBuffer> sb = mem_buf(x->src->mem);
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkBufferImageCopy *r = &x->r[i];
+                    if (vk_copy_trace(s, 0)) VLOG("[COPYB2I] submit=%llu image=%ux%u fmt=%d aspect=%#x mip=%u layer=%u+%u offset=%d,%d,%d extent=%ux%ux%u row=%u image_height=%u",
+                        (unsigned long long)s->sq->v, im->w, im->h, im->fmt, r->imageSubresource.aspectMask, r->imageSubresource.mipLevel,
+                        r->imageSubresource.baseArrayLayer, r->imageSubresource.layerCount, r->imageOffset.x, r->imageOffset.y, r->imageOffset.z,
+                        r->imageExtent.width, r->imageExtent.height, r->imageExtent.depth, r->bufferRowLength, r->bufferImageHeight);
                     uint32_t rl = r->bufferRowLength ? r->bufferRowLength : r->imageExtent.width, ih = r->bufferImageHeight ? r->bufferImageHeight : r->imageExtent.height;
                     NSUInteger bpr = (NSUInteger)((rl + f->bw - 1) / f->bw) * f->bytes, bpi = bpr * ((ih + f->bh - 1) / f->bh);
                     int is3d = im->type == VK_IMAGE_TYPE_3D;
@@ -1302,6 +1638,10 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                 id<MTLBlitCommandEncoder> be = blit(s, h->op);
                 for (uint32_t i = 0; i < x->n; i++) {
                     const VkImageCopy *r = &x->r[i]; int a3 = a->type == VK_IMAGE_TYPE_3D, b3 = b->type == VK_IMAGE_TYPE_3D;
+                    if (vk_copy_trace(s, 1)) VLOG("[COPYI] submit=%llu src=%ux%u fmt=%d mip=%u layer=%u+%u off=%d,%d,%d dst=%ux%u fmt=%d mip=%u layer=%u+%u off=%d,%d,%d extent=%ux%ux%u",
+                        (unsigned long long)s->sq->v, a->w, a->h, a->fmt, r->srcSubresource.mipLevel, r->srcSubresource.baseArrayLayer, r->srcSubresource.layerCount,
+                        r->srcOffset.x, r->srcOffset.y, r->srcOffset.z, b->w, b->h, b->fmt, r->dstSubresource.mipLevel, r->dstSubresource.baseArrayLayer,
+                        r->dstSubresource.layerCount, r->dstOffset.x, r->dstOffset.y, r->dstOffset.z, r->extent.width, r->extent.height, r->extent.depth);
                     uint32_t nl = a3 ? 1 : r->srcSubresource.layerCount;
                     for (uint32_t l = 0; l < nl; l++)
                         [be copyFromTexture:a->tex sourceSlice:a3 ? 0 : r->srcSubresource.baseArrayLayer + l sourceLevel:r->srcSubresource.mipLevel
@@ -1331,6 +1671,41 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
                                sourceOrigin:MTLOriginMake(r->imageOffset.x, r->imageOffset.y, is3d ? r->imageOffset.z : 0)
                                  sourceSize:MTLSizeMake(r->imageExtent.width, r->imageExtent.height, is3d ? r->imageExtent.depth : 1)
                                    toBuffer:db destinationOffset:x->dst->off + r->bufferOffset + l * bpi destinationBytesPerRow:bpr destinationBytesPerImage:bpi options:opt];
+                }
+                g_n_copy += x->n;
+                break;
+            }
+            case C_RESOLVE: {
+                const c_resolve *x = c; VkImage src = x->src, dst = x->dst;
+                if (!src->tex || !dst->tex || src->samples <= 1 || dst->samples != 1 || src->fmt != dst->fmt) {
+                    RED1("resolve images unsupported: src %p samples %u fmt %d, dst %p samples %u fmt %d", (void *)src, src->samples, src->fmt, (void *)dst, dst->samples, dst->fmt); break;
+                }
+                if (s->re) { end_rp(s, 0); s->cut = 1; }
+                end_blit(s);
+                for (uint32_t i = 0; i < x->n; i++) {
+                    const VkImageResolve *r = &x->r[i];
+                    if (vk_copy_trace(s, 2)) VLOG("[RESOLVE] submit=%llu src=%ux%u samples=%u dst=%ux%u region src_mip=%u layer=%u+%u off=%d,%d dst_mip=%u layer=%u+%u off=%d,%d extent=%ux%u",
+                        (unsigned long long)s->sq->v, src->w, src->h, src->samples, dst->w, dst->h, r->srcSubresource.mipLevel,
+                        r->srcSubresource.baseArrayLayer, r->srcSubresource.layerCount, r->srcOffset.x, r->srcOffset.y, r->dstSubresource.mipLevel,
+                        r->dstSubresource.baseArrayLayer, r->dstSubresource.layerCount, r->dstOffset.x, r->dstOffset.y, r->extent.width, r->extent.height);
+                    uint32_t sw = umax(1, src->w >> r->srcSubresource.mipLevel), sh = umax(1, src->h >> r->srcSubresource.mipLevel);
+                    uint32_t dw = umax(1, dst->w >> r->dstSubresource.mipLevel), dh = umax(1, dst->h >> r->dstSubresource.mipLevel);
+                    if (r->srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT || r->dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+                        r->srcOffset.x || r->srcOffset.y || r->dstOffset.x || r->dstOffset.y || r->extent.width != sw || r->extent.height != sh ||
+                        r->extent.width != dw || r->extent.height != dh || r->srcSubresource.layerCount != r->dstSubresource.layerCount) {
+                        RED1("resolve region not a full color subresource: extent %ux%u source %ux%u destination %ux%u", r->extent.width, r->extent.height, sw, sh, dw, dh); continue;
+                    }
+                    for (uint32_t l = 0; l < r->srcSubresource.layerCount; l++) {
+                        MTLRenderPassDescriptor *pd = [MTLRenderPassDescriptor renderPassDescriptor];
+                        MTLRenderPassColorAttachmentDescriptor *ca = pd.colorAttachments[0];
+                        ca.texture = src->tex; ca.level = r->srcSubresource.mipLevel; ca.slice = r->srcSubresource.baseArrayLayer + l;
+                        ca.resolveTexture = dst->tex; ca.resolveLevel = r->dstSubresource.mipLevel; ca.resolveSlice = r->dstSubresource.baseArrayLayer + l;
+                        ca.loadAction = MTLLoadActionLoad; ca.storeAction = MTLStoreActionMultisampleResolve;
+                        pd.renderTargetWidth = r->extent.width; pd.renderTargetHeight = r->extent.height; pd.renderTargetArrayLength = 1;
+                        id<MTLRenderCommandEncoder> re = [s->cb renderCommandEncoderWithDescriptor:pd];
+                        if (!re) { RED1("Metal could not create a render encoder for Vulkan image resolve"); break; }
+                        [re endEncoding];
+                    }
                 }
                 g_n_copy += x->n;
                 break;
@@ -1507,10 +1882,9 @@ VKB(vkAcquireNextImageKHR, VkResult, VkDevice d, VkSwapchainKHR sc, uint64_t tim
     if (f) atomic_store(&f->val, 0);
     *idx = i; return VK_SUCCESS;
 }
-static uint64_t g_frames;
 static void frame_end(void) {
     static uint64_t pd, pp, ps, pc;
-    uint64_t f = ++g_frames, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
+    uint64_t f = atomic_fetch_add_explicit(&g_frames, 1, memory_order_relaxed) + 1, dr = g_n_draw, pa = g_n_pass, su = g_n_submit, co = g_n_copy;
     if (f <= 3 || f % 300 == 0)
         VLOG("frame %llu: draws %llu, passes %llu, submits %llu, copies %llu (since the last record, %llu frames); pipelines so far %llu, buffer memory %.1f MB", (unsigned long long)f, (unsigned long long)(dr - pd),
              (unsigned long long)(pa - pp), (unsigned long long)(su - ps), (unsigned long long)(co - pc), (unsigned long long)(f <= 3 ? 1 : 300), (unsigned long long)g_n_pso, g_mem_bytes / 1048576.0);
