@@ -4,8 +4,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
+#include "log_rotation.h"
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 void dm_host_preload_start(int argc, char **argv);
@@ -13,6 +17,22 @@ UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
 
 static char *g_argv[4]; static int g_argc;
+typedef struct { char *active, *previous; } diag_log_paths;
+static void *diag_log_rotate_thread(void *arg) {
+    diag_log_paths *paths = arg;
+    // 20ms poll: worst-case overshoot past the 1 GiB limit is bounded by
+    // however much the game's combined log output can produce in 20ms
+    // (thousands of lines/sec at most in practice), not an unbounded burst.
+    for (;;) {
+        usleep(20000);
+        flockfile(stderr);
+        int result = dm_log_rotate_file(stderr, paths->active, paths->previous, UINT64_C(1) << 30);
+        if (result > 0) fprintf(stderr, "[kh2-diag] log rotated at 1 GiB; previous segment overwritten\n");
+        else if (result < 0) fprintf(stderr, "[RED] kh2 diagnostic log rotation failed errno=%d\n", errno);
+        funlockfile(stderr);
+    }
+    return NULL;
+}
 
 static NSString *romfs_locate(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -49,6 +69,17 @@ static int boot_env(void) {
         }
     }
     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (Launcher.swift)
+    if (getenv("DM_KH24_DIAG") && atoi(getenv("DM_KH24_DIAG")) && !strcmp(DM_GAME_ID, "010090c022978003")) {
+        setenv("DM_FS", "1", 1);
+        setenv("DM_SAVE_TRACE", "1", 1); // KH2 uses Vulkan: hle_vk.m records its actual Metal passes under DM_KH24_DIAG
+        diag_log_paths *paths = calloc(1, sizeof *paths);
+        if (paths) { paths->active = strdup(log.fileSystemRepresentation); paths->previous = strdup(prev.fileSystemRepresentation); }
+        dm_log_rotate_assert_sole_owner(fileno(stderr));
+        pthread_t thread;
+        if (!paths || !paths->active || !paths->previous || pthread_create(&thread, NULL, diag_log_rotate_thread, paths)) {
+            fprintf(stderr, "[RED] KH2 continuous diagnostic log rotation could not start\n");
+        } else { pthread_detach(thread); fprintf(stderr, "[kh2-diag] continuous save/write and Vulkan-to-Metal pass logs enabled; log.txt and log.prev.txt rotate at 1 GiB each\n"); }
+    }
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when the process makes its first device (the early loading below may make it)
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG
     // (or the launcher, which replaces this default before the game starts)

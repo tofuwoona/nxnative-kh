@@ -123,6 +123,18 @@ static _Atomic uint64_t g_done;                 // highest value whose command b
 static pthread_mutex_t g_qmu = PTHREAD_MUTEX_INITIALIZER, g_done_mu = PTHREAD_MUTEX_INITIALIZER, g_mem_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_done_cv = PTHREAD_COND_INITIALIZER;
 static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem_bytes;
+static _Atomic uint64_t g_frames;
+static int vk_diag_on(void) {
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    static _Atomic int enabled = -1;
+    int v = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("DM_KH24_DIAG"); v = e && *e && strcmp(e, "0");
+        atomic_store_explicit(&enabled, v, memory_order_relaxed); }
+    return v;
+#else
+    return 0;
+#endif
+}
 
 // Shader table (<DM_MSL_DIR>/vk/vk_shaders.tsv): resource kind u / b / t / s / c, its (set, binding) in the game's SPIR-V and the Metal slot it was moved to;
 // kind p is the push-constant block (set and binding 0), whose bytes are set straight into its buffer slot
@@ -1204,6 +1216,8 @@ static void end_blit(rs_t *s) { if (s->be) { [s->be endEncoding]; s->be = nil; }
 static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
 static void end_rp(rs_t *s, int final) {   // final: the pass's own store actions; otherwise everything is stored, to be loaded again when the pass resumes
     if (!s->re) return;
+    if (vk_diag_on()) VLOG("[vk-diag] end frame=%llu submit=%llu pass=%llu %s", (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed),
+         (unsigned long long)(s->sq ? s->sq->v : 0), (unsigned long long)g_n_pass, final ? "final" : "cut-store-for-resume");
     MTLRenderPassDescriptor *d = s->rpd;
     for (int i = 0; i < 8; i++) if (d.colorAttachments[i].texture) [s->re setColorStoreAction:final ? s->st_col[i] : keep(s->st_col[i]) atIndex:i];
     if (d.depthAttachment.texture) [s->re setDepthStoreAction:final ? s->st_d : MTLStoreActionStore];
@@ -1224,6 +1238,8 @@ static void resume_rp(rs_t *s) {
     if (d.depthAttachment.texture) d.depthAttachment.loadAction = MTLLoadActionLoad;
     if (d.stencilAttachment.texture) d.stencilAttachment.loadAction = MTLLoadActionLoad;
     s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->cut = 0;
+    if (vk_diag_on()) VLOG("[vk-diag] resume frame=%llu submit=%llu pass=%llu attachments=load", (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed),
+         (unsigned long long)(s->sq ? s->sq->v : 0), (unsigned long long)g_n_pass);
     s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
 }
 static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : o == VK_ATTACHMENT_LOAD_OP_LOAD ? MTLLoadActionLoad : MTLLoadActionDontCare; }
@@ -1265,6 +1281,20 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     if (!s->have_sc) s->sc = (VkRect2D){{0, 0}, {w, h}};
     s->vp_dirty = s->sc_dirty = 1;
     g_n_pass++;
+    if (vk_diag_on()) {
+        uint64_t frame = atomic_load_explicit(&g_frames, memory_order_relaxed), submit = s->sq ? s->sq->v : 0;
+        VLOG("[vk-diag] pass frame=%llu submit=%llu pass=%llu %ux%u colors=%u depth=%d", (unsigned long long)frame,
+             (unsigned long long)submit, (unsigned long long)g_n_pass, w, h, rp->ncol, rp->depth);
+        for (uint32_t i = 0; i < rp->ncol && i < 8; i++) {
+            MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
+            if (ca.texture) VLOG("[vk-diag] color frame=%llu pass=%llu slot=%u tex=%p fmt=%lu load=%lu store=%lu resolve=%p", (unsigned long long)frame,
+                 (unsigned long long)g_n_pass, i, (__bridge void *)ca.texture, (unsigned long)ca.texture.pixelFormat,
+                 (unsigned long)ca.loadAction, (unsigned long)s->st_col[i], (__bridge void *)ca.resolveTexture);
+        }
+        if (d.depthAttachment.texture) VLOG("[vk-diag] depth frame=%llu pass=%llu tex=%p fmt=%lu load=%lu store=%lu", (unsigned long long)frame,
+             (unsigned long long)g_n_pass, (__bridge void *)d.depthAttachment.texture, (unsigned long)d.depthAttachment.texture.pixelFormat,
+             (unsigned long)d.depthAttachment.loadAction, (unsigned long)s->st_d);
+    }
 }
 static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t *e, VkDeviceSize off, int frag) {
     static int enabled = -1, min_init;
@@ -1386,7 +1416,6 @@ static void bind_push(rs_t *s, const shinfo *si, int frag) {   // the push-const
         if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
     }
 }
-static _Atomic uint64_t g_frames;
 static int pre_draw(rs_t *s) {
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
@@ -1466,6 +1495,10 @@ static int pre_draw(rs_t *s) {
         }
     }
     if (s->applied != p) {
+        if (vk_diag_on()) VLOG("[vk-diag] pipeline frame=%llu submit=%llu pass=%llu vs=%s fs=%s blend=%u src=%u dst=%u write=%u",
+             (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed), (unsigned long long)(s->sq ? s->sq->v : 0),
+             (unsigned long long)g_n_pass, p->vs ? p->vs->key : "none", p->fs ? p->fs->key : "none",
+             p->diag_blend_enable, p->diag_src_rgb, p->diag_dst_rgb, p->diag_write_mask);
         [re setRenderPipelineState:p->pso]; [re setDepthStencilState:p->dss ? p->dss : g_dss_off];
         [re setCullMode:p->cull]; [re setFrontFacingWinding:p->wind]; [re setTriangleFillMode:p->fill]; [re setDepthClipMode:p->clip];
         [re setDepthBias:p->bias ? p->bias_c : 0 slopeScale:p->bias ? p->bias_s : 0 clamp:p->bias ? p->bias_cl : 0];
