@@ -1,0 +1,5 @@
+[dm] [vk] [vk-diag] encoder frame=12 submit=3 encoder=77 pass=0 reason=begin
+[dm] [vk] [vk-diag] pass frame=12 submit=3 pass=1 1920x1080 colors=1 depth=1 rp=0x1 fb=0x2 merged=0 encoder=77 area=0,0,1920x1080
+[dm] [vk] [vk-diag] color frame=12 pass=1 slot=0 tex=0x9 fmt=70 load=1 store=1 resolve=0x0 mip=0 layer=0
+[dm] [vk] [vk-diag] pass frame=12 submit=3 pass=2 1920x1080 colors=1 depth=1 rp=0x1 fb=0x2 merged=1 encoder=77 area=0,0,1920x1080
+[dm] [vk] [vk-diag] color frame=12 pass=2 slot=0 tex=0x9 fmt=70 load=1 store=1 resolve=0x0 mip=0 layer=0

@@ -18,6 +18,7 @@
 #include "../nvn/nvn_mtl.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
+#include "pass_coalesce.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach-o/getsect.h>
@@ -129,6 +130,17 @@ static int vk_diag_on(void) {
     static _Atomic int enabled = -1;
     int v = atomic_load_explicit(&enabled, memory_order_relaxed);
     if (v < 0) { const char *e = getenv("DM_KH24_DIAG"); v = e && *e && strcmp(e, "0");
+        atomic_store_explicit(&enabled, v, memory_order_relaxed); }
+    return v;
+#else
+    return 0;
+#endif
+}
+static int vk_coalesce_on(void) {
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    static _Atomic int enabled = -1;
+    int v = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("DM_VK_COALESCE_PASSES"); v = e && !strcmp(e, "1");
         atomic_store_explicit(&enabled, v, memory_order_relaxed); }
     return v;
 #else
@@ -1209,8 +1221,19 @@ typedef struct {
     // The current render pass: its descriptor (attachments created with deferred store actions) and the store actions it ends with; cut = its encoder was ended
     // for a copy in the middle of the pass and is resumed (loading the attachments) at the next draw
     MTLRenderPassDescriptor *rpd; MTLStoreAction st_col[8], st_d, st_s; int cut;
+    vk_pass_key pass_key;
+    int merged_pending, feedback_resolved;
+    uint64_t encoder_id;
 } rs_t;
 #define DONE_RING 1024
+static _Atomic uint64_t g_n_encoder;
+static void vk_diag_encoder(rs_t *s, const char *why) {
+    s->encoder_id = atomic_fetch_add_explicit(&g_n_encoder, 1, memory_order_relaxed) + 1;
+    if (vk_diag_on()) VLOG("[vk-diag] encoder frame=%llu submit=%llu encoder=%llu pass=%llu reason=%s",
+        (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed),
+        (unsigned long long)(s->sq ? s->sq->v : 0), (unsigned long long)s->encoder_id,
+        (unsigned long long)g_n_pass, why);
+}
 static uint64_t g_done_ns[DONE_RING];   // completion time of submit v at [v % DONE_RING] (timestamp query results)
 static void end_blit(rs_t *s) { if (s->be) { [s->be endEncoding]; s->be = nil; } }
 static MTLStoreAction keep(MTLStoreAction a) { return a == MTLStoreActionMultisampleResolve || a == MTLStoreActionStoreAndMultisampleResolve ? MTLStoreActionStoreAndMultisampleResolve : MTLStoreActionStore; }
@@ -1238,15 +1261,97 @@ static void resume_rp(rs_t *s) {
     if (d.depthAttachment.texture) d.depthAttachment.loadAction = MTLLoadActionLoad;
     if (d.stencilAttachment.texture) d.stencilAttachment.loadAction = MTLLoadActionLoad;
     s->re = [s->cb renderCommandEncoderWithDescriptor:d]; s->cut = 0;
+    if (s->re) vk_diag_encoder(s, "resume");
     if (vk_diag_on()) VLOG("[vk-diag] resume frame=%llu submit=%llu pass=%llu attachments=load", (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed),
          (unsigned long long)(s->sq ? s->sq->v : 0), (unsigned long long)g_n_pass);
     s->applied = NULL; s->vp_dirty = s->sc_dirty = 1;
 }
 static MTLLoadAction load_a(VkAttachmentLoadOp o) { return o == VK_ATTACHMENT_LOAD_OP_CLEAR ? MTLLoadActionClear : o == VK_ATTACHMENT_LOAD_OP_LOAD ? MTLLoadActionLoad : MTLLoadActionDontCare; }
 static MTLStoreAction store_a(VkAttachmentStoreOp o) { return o == VK_ATTACHMENT_STORE_OP_DONT_CARE ? MTLStoreActionDontCare : MTLStoreActionStore; }
+static vk_pass_key pass_key(const c_brp *c) {
+    VkRenderPass rp = c->rp;
+    vk_pass_key k = {0};
+    k.rp = rp; k.fb = c->fb;
+    k.area.x = c->area.offset.x; k.area.y = c->area.offset.y;
+    k.area.width = c->area.extent.width; k.area.height = c->area.extent.height;
+    k.color_count = rp->ncol; k.depth = rp->depth;
+    for (uint32_t i = 0; i < rp->ncol && i < 8; i++) {
+        int a = rp->col[i];
+        k.color[i] = (vk_pass_color){a, rp->res[i], a >= 0 ? rp->att[a].load : VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+            a >= 0 ? rp->att[a].store : VK_ATTACHMENT_STORE_OP_DONT_CARE};
+    }
+    if (rp->depth >= 0 && (uint32_t)rp->depth < rp->natt) {
+        const ratt *a = &rp->att[rp->depth];
+        const fmt_t *f = fmt_of(a->fmt);
+        k.depth_load = fmt_has_depth(f) ? a->load : VK_ATTACHMENT_LOAD_OP_LOAD;
+        k.depth_store = fmt_has_depth(f) ? a->store : VK_ATTACHMENT_STORE_OP_STORE;
+        k.stencil_load = fmt_has_stencil(f) ? a->sload : VK_ATTACHMENT_LOAD_OP_LOAD;
+        k.stencil_store = fmt_has_stencil(f) ? a->sstore : VK_ATTACHMENT_STORE_OP_STORE;
+    }
+    return k;
+}
+static int pass_storage_safe(const c_brp *c) {
+    VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
+    if (!rp || !fb || rp->ncol > 8 || !rp->ncol) return 0;
+    for (uint32_t i = 0; i < rp->ncol; i++) {
+        int a = rp->col[i];
+        if (a < 0 || (uint32_t)a >= fb->n || !fb->v[a]) return 0;
+        id<MTLTexture> t = fb->v[a]->tex;
+        while (t && t.parentTexture) t = t.parentTexture;
+        if (!vk_pass_attachment_safe(t != nil, t.buffer != nil, t.heap != nil)) return 0;
+    }
+    if (rp->depth >= 0) {
+        if ((uint32_t)rp->depth >= fb->n || !fb->v[rp->depth]) return 0;
+        id<MTLTexture> t = fb->v[rp->depth]->tex;
+        while (t && t.parentTexture) t = t.parentTexture;
+        if (!vk_pass_attachment_safe(t != nil, t.buffer != nil, t.heap != nil)) return 0;
+    }
+    return 1;
+}
+// Emit one record for EVERY Vulkan pass, even when several passes reuse one
+// Metal encoder. The stable prefix retains compatibility with older analyzers.
+static void vk_diag_pass(rs_t *s, const c_brp *c, int merged) {
+    if (!vk_diag_on()) return;
+    VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
+    MTLRenderPassDescriptor *d = s->rpd;
+    uint64_t frame=atomic_load_explicit(&g_frames, memory_order_relaxed), submit=s->sq ? s->sq->v : 0;
+    VLOG("[vk-diag] pass frame=%llu submit=%llu pass=%llu %ux%u colors=%u depth=%d rp=%p fb=%p merged=%d encoder=%llu area=%d,%d,%ux%u",
+        (unsigned long long)frame, (unsigned long long)submit, (unsigned long long)g_n_pass,
+        s->rt_w, s->rt_h, rp->ncol, rp->depth, (void *)rp, (void *)fb, merged,
+        (unsigned long long)s->encoder_id, c->area.offset.x, c->area.offset.y, c->area.extent.width, c->area.extent.height);
+    for (uint32_t i=0;i<rp->ncol && i<8;i++) {
+        MTLRenderPassColorAttachmentDescriptor *ca=d.colorAttachments[i];
+        if (ca.texture) VLOG("[vk-diag] color frame=%llu pass=%llu slot=%u tex=%p fmt=%lu load=%lu store=%lu resolve=%p mip=%lu layer=%lu",
+            (unsigned long long)frame, (unsigned long long)g_n_pass, i, (__bridge void *)ca.texture,
+            (unsigned long)ca.texture.pixelFormat, (unsigned long)ca.loadAction,
+            (unsigned long)s->st_col[i], (__bridge void *)ca.resolveTexture,
+            (unsigned long)ca.level, (unsigned long)ca.slice);
+    }
+    if (d.depthAttachment.texture) VLOG("[vk-diag] depth frame=%llu pass=%llu tex=%p fmt=%lu load=%lu store=%lu mip=%lu layer=%lu",
+        (unsigned long long)frame, (unsigned long long)g_n_pass, (__bridge void *)d.depthAttachment.texture,
+        (unsigned long)d.depthAttachment.texture.pixelFormat, (unsigned long)d.depthAttachment.loadAction,
+        (unsigned long)s->st_d, (unsigned long)d.depthAttachment.level, (unsigned long)d.depthAttachment.slice);
+    if (d.stencilAttachment.texture) VLOG("[vk-diag] stencil frame=%llu pass=%llu tex=%p load=%lu store=%lu mip=%lu layer=%lu",
+        (unsigned long long)frame, (unsigned long long)g_n_pass, (__bridge void *)d.stencilAttachment.texture,
+        (unsigned long)d.stencilAttachment.loadAction, (unsigned long)s->st_s,
+        (unsigned long)d.stencilAttachment.level, (unsigned long)d.stencilAttachment.slice);
+}
 static void begin_rp(rs_t *s, const c_brp *c) {
+    // Experimental opt-in: adjacent LOAD/STORE passes on the same attachments can share an encoder.
+    // Never bridge a blit, query, submit boundary, clear, resolve, or changed render area.
+    vk_pass_key next = pass_key(c);
+    if (s->re && !s->cut && vk_coalesce_on() &&
+        vk_pass_can_coalesce(&s->pass_key, &next, pass_storage_safe(c))) {
+        s->pass_key = next;
+        s->merged_pending = 1; s->feedback_resolved = 0;
+        g_n_pass++; // Vulkan passes still count as passes in host telemetry.
+        vk_diag_pass(s, c, 1);
+        return;
+    }
     end_blit(s);
     end_rp(s, 1); s->cut = 0;
+    s->merged_pending = 0; s->feedback_resolved = 0;
+    s->pass_key = next;
     VkRenderPass rp = c->rp; VkFramebuffer fb = c->fb;
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
     uint32_t w = fb->w, h = fb->h;
@@ -1274,6 +1379,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     if (!rp->ncol && rp->depth < 0) { d.renderTargetWidth = fb->w; d.renderTargetHeight = fb->h; d.defaultRasterSampleCount = 1; }
     if (s->sq && s->sq->vis) d.visibilityResultBuffer = s->sq->vis;
     s->rpd = d; s->re = [s->cb renderCommandEncoderWithDescriptor:d];
+    if (s->re) vk_diag_encoder(s, "begin");
     s->applied = NULL; s->rt_w = w; s->rt_h = h;
     // Dynamic viewport and scissor persist across render passes within a command buffer, as in Vulkan; the render target's size stands in only until the game sets them.
     // Resetting them at every pass drew Super Mario Galaxy's handheld UI 1.5x too big: it sets a 1280x720 viewport once and then draws through several passes into its 1920x1080 swapchain
@@ -1281,20 +1387,7 @@ static void begin_rp(rs_t *s, const c_brp *c) {
     if (!s->have_sc) s->sc = (VkRect2D){{0, 0}, {w, h}};
     s->vp_dirty = s->sc_dirty = 1;
     g_n_pass++;
-    if (vk_diag_on()) {
-        uint64_t frame = atomic_load_explicit(&g_frames, memory_order_relaxed), submit = s->sq ? s->sq->v : 0;
-        VLOG("[vk-diag] pass frame=%llu submit=%llu pass=%llu %ux%u colors=%u depth=%d", (unsigned long long)frame,
-             (unsigned long long)submit, (unsigned long long)g_n_pass, w, h, rp->ncol, rp->depth);
-        for (uint32_t i = 0; i < rp->ncol && i < 8; i++) {
-            MTLRenderPassColorAttachmentDescriptor *ca = d.colorAttachments[i];
-            if (ca.texture) VLOG("[vk-diag] color frame=%llu pass=%llu slot=%u tex=%p fmt=%lu load=%lu store=%lu resolve=%p", (unsigned long long)frame,
-                 (unsigned long long)g_n_pass, i, (__bridge void *)ca.texture, (unsigned long)ca.texture.pixelFormat,
-                 (unsigned long)ca.loadAction, (unsigned long)s->st_col[i], (__bridge void *)ca.resolveTexture);
-        }
-        if (d.depthAttachment.texture) VLOG("[vk-diag] depth frame=%llu pass=%llu tex=%p fmt=%lu load=%lu store=%lu", (unsigned long long)frame,
-             (unsigned long long)g_n_pass, (__bridge void *)d.depthAttachment.texture, (unsigned long)d.depthAttachment.texture.pixelFormat,
-             (unsigned long)d.depthAttachment.loadAction, (unsigned long)s->st_d);
-    }
+    vk_diag_pass(s, c, 0);
 }
 static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t *e, VkDeviceSize off, int frag) {
     static int enabled = -1, min_init;
@@ -1416,7 +1509,54 @@ static void bind_push(rs_t *s, const shinfo *si, int frag) {   // the push-const
         if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
     }
 }
+static id<MTLTexture> pass_texture_root(id<MTLTexture> t) {
+    while (t.parentTexture) t = t.parentTexture;
+    return t;
+}
+static int pass_feedback_shader(rs_t *s, const shinfo *si) {
+    if (!si) return 0;
+    for (int i = 0; i < si->nres; i++) {
+        const shres *r = &si->res[i];
+        if (r->kind == 'u' || r->kind == 'b') {
+            // A buffer descriptor can alias a buffer-backed render target or a
+            // placed resource. Eligibility rejects these at begin_rp, and this
+            // remains a fail-closed backstop if an attachment changes later.
+            MTLRenderPassDescriptor *d = s->rpd;
+            for (int j=0;j<8;j++) {
+                id<MTLTexture> a=pass_texture_root(d.colorAttachments[j].texture);
+                if (a && (a.buffer || a.heap)) return 1;
+            }
+            id<MTLTexture> a=pass_texture_root(d.depthAttachment.texture);
+            if (a && (a.buffer || a.heap)) return 1;
+            a=pass_texture_root(d.stencilAttachment.texture);
+            if (a && (a.buffer || a.heap)) return 1;
+            continue;
+        }
+        if (r->kind != 't' && r->kind != 'c') continue;
+        VkDescriptorSet ds = r->set < 8 ? s->set[r->set].s : NULL;
+        int bi = ds && r->binding < 128 ? ds->L->idx[r->binding] : -1;
+        if (bi < 0) return 1; // unbound/unknown resource: do not assume it is safe
+        const lbind *lb = &ds->L->b[bi];
+        if (!lb->count || r->count > lb->count) return 1;
+        for (uint32_t k = 0; k < r->count; k++) {
+            id<MTLTexture> t = ds->d[lb->base + k].tex;
+            MTLRenderPassDescriptor *d = s->rpd;
+            if (!t) return 1;
+            t = pass_texture_root(t);
+            for (int j = 0; j < 8; j++) if (t == pass_texture_root(d.colorAttachments[j].texture)) return 1;
+            if (t == pass_texture_root(d.depthAttachment.texture) || t == pass_texture_root(d.stencilAttachment.texture)) return 1;
+        }
+    }
+    return 0;
+}
 static int pre_draw(rs_t *s) {
+    if (s->merged_pending && !s->feedback_resolved && !s->cut && s->re) {
+        // Check EVERY draw, not just the first. A later draw may sample an
+        // attachment written by the prior Vulkan pass after unrelated draws.
+        if (s->pipe && (pass_feedback_shader(s, s->pipe->vs) || pass_feedback_shader(s, s->pipe->fs))) {
+            end_rp(s, 0); s->cut = 1; s->feedback_resolved = 1;
+        }
+    }
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
     if (!re) { RED1("draw outside a render pass"); return 0; }
@@ -1546,7 +1686,21 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
         const chdr *h = (const chdr *)(cb->buf + o); const void *c = h + 1; o += h->size;
         switch (h->op) {
             case C_BRP: begin_rp(s, c); break;
-            case C_ERP: end_rp(s, 1); s->cut = 0; s->rpd = nil; break;
+            case C_ERP: {
+                // Defer the store only if the very next command begins another pass.
+                // begin_rp checks attachment/load/store compatibility; all other commands
+                // still observe the Vulkan render-pass boundary as an encoder boundary.
+                const chdr *next = o < cb->n ? (const chdr *)(cb->buf + o) : NULL;
+                if (!next || next->op != C_BRP || !vk_coalesce_on()) {
+                    end_rp(s, 1); s->rpd = nil;
+                } else if (vk_diag_on()) {
+                    VLOG("[vk-diag] boundary frame=%llu submit=%llu pass=%llu deferred=1",
+                         (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed),
+                         (unsigned long long)(s->sq ? s->sq->v : 0), (unsigned long long)g_n_pass);
+                }
+                s->cut = 0;
+                break;
+            }
             case C_PIPE: s->pipe = ((const c_pipe *)c)->p; break;
             case C_SETS: {
                 const c_sets *x = c; uint32_t k = 0;
@@ -1747,6 +1901,7 @@ static void replay(rs_t *s, VkCommandBuffer cb) {
             case C_QTS: { const c_query *x = c; if (x->first < x->q->n) x->q->ticket[x->first] = s->sq->v; break; }
             case C_QBEGIN: {
                 const c_query *x = c; subq_t *q = s->sq;
+                if (s->merged_pending) { end_rp(s, 0); s->cut = 1; s->merged_pending = 0; }
                 if (!s->re && s->cut) resume_rp(s);
                 if (x->q->type != VK_QUERY_TYPE_OCCLUSION) { RED1("query type %d not implemented", x->q->type); break; }
                 if (!s->re || !q->vis || q->nvis == q->cap || x->first >= x->q->n) { RED1("occlusion query outside a render pass or past the buffer"); break; }
