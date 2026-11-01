@@ -1,0 +1,59 @@
+{
+  "base": "70eca8a8c1dfefe972ae91a5851fbe5aaa6a3205",
+  "branch": "fix/kh-save-adversarial-108",
+  "git_common_dir": "/Users/tofu/Documents/Workspace/nxnative-kh/.git",
+  "production_files_changed": ["dm/host/hle_fs.c"],
+  "fixed_findings": ["SAVE-01", "SAVE-02", "SAVE-03", "SAVE-04", "SAVE-05", "SAVE-06"],
+  "results": {
+    "red": {"commands": 54, "exit_0": 40, "exit_1": 14, "adversarial_invocations": 32, "adversarial_checks": 94, "failed_checks": 22},
+    "red-extended": {"commands": 62, "exit_0": 22, "exit_1": 40, "adversarial_invocations": 56, "adversarial_checks": 324, "failed_checks": 108},
+    "green": {"commands": 78, "exit_0": 78, "failed_commands": 0, "cases_per_profile": 28, "adversarial_invocations": 56, "adversarial_checks": 324, "failed_checks": 0},
+    "sanitized": {"profile": "010090C022978003", "commands": 29, "exit_0": 29, "address_sanitizer": true, "undefined_behavior_sanitizer": true, "leak_detection": false},
+    "normal_suites": {
+      "kh2": {"t_fs": 74, "t_fs_case": 51, "t_fs_commit_list": 36, "failed_checks": 0, "trace": "pass"},
+      "kh1": {"t_fs": 64, "t_fs_case": 51, "t_fs_commit_list": 36, "failed_checks": 0, "trace": "pass"}
+    },
+    "synthetic_container_bytes": 7073032,
+    "every_final_adversarial_case_execs_fresh_reader": true,
+    "mac_host_build_exit": 0
+  },
+  "mac_host": {
+    "path": "/Users/tofu/.hermes/cache/scratch/kh-save-fix-108/dm/host/dmhost",
+    "sha256": "cdc30bc549a86da31647ea97add67752f883b561ef27f78f038c0c630555f38b",
+    "bytes": 2450616,
+    "profile": "010090C022978003",
+    "main_build_id_contract": "e1bced80ffd14436980f7490b1d3c3e7",
+    "mem_used": "0x4200000",
+    "warnings_in_unchanged_files": 45,
+    "hle_fs_warnings": 0,
+    "gpu_run": false,
+    "ios_package": false
+  },
+  "preserved": {
+    "baseline_migration_helper_byte_identical": true,
+    "migration_enabled_by_fix": false,
+    "coalescer_settings_sha256": "d330f00ed48ef8e1b42a8fc9b042ca67c2cfe871622dac0e27258e82d8d5ccc1",
+    "coalescer_settings_uncommitted_and_excluded": true,
+    "shared_source_head_unchanged": true,
+    "phones_accessed": false,
+    "original_saves_accessed": false,
+    "fsync_policy_changed": false,
+    "suspend_commit_policy_changed": false
+  },
+  "source_sha256": {
+    "dm/host/hle_fs.c": "cc4b80bce2ef193e587b30b67bf39c3ca4d00ef6255774367d7e105fd54e9b4d",
+    "dm/host/tests/t_fs.c": "9de02003fea2494d603595ab0ca3723bf53505f6039f1cce731d8664ac36cb80",
+    "dm/host/tests/t_fs_save_adversarial.c": "d030bf6cea76c8911030d9ff2cd44b83a9aadfaf65ce2ac7c6678ca91aeca4ef",
+    "dm/host/tests/run_save_review.py": "036df75f81123358ccd7ec132fabe7c0b0beaad1c4f43c6ea92ee7fd091e97b8",
+    "dm/host/tests/t_save_adversarial_stub.c": "8adedd6aef2893ff4dd6143cc7ee965683c2d0b953a36c20d4b5b3107d74e13a",
+    "dm/host/tests/t_save_review_input_stub.c": "92ed9ba96f2151b38c6eb07a499900c0fcf676543f4371dfd86bac363933426e"
+  },
+  "limits": [
+    "No gameplay serialization, UI timing, slot reload or historical root-cause claim",
+    "Stale-handle reuse and write/Commit overlap are caller-conditional, not demonstrated in current gameplay",
+    "No power-loss/kernel-crash durability claim",
+    "No physical suspend/force-close/device verification",
+    "Injected syscall/scheduling failures are not actual full-volume testing",
+    "Concurrent close/read of one handle is outside supported SDK usage"
+  ]
+}
