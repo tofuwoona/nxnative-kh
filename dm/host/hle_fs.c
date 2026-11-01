@@ -263,6 +263,27 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         if (strlen(g_mnt[i].name) != ln || strncmp(g_mnt[i].name, p, ln)) continue;
         if (ro) *ro = g_mnt[i].ro;
         char normed[1024]; const char *rest = c + 1;
+        // KH2's exported save can contain a legacy flat filename with literal
+        // Windows separators (its own runtime also issues slash-separated
+        // paths for the same file at other times). Collapse both spellings
+        // onto the same canonical slash-separated path so every open/write
+        // from this point on lands on one consistent file, instead of the
+        // two spellings silently diverging into separate files. Verified on
+        // real hardware (iPhone): a save committed via the backslash guest
+        // path lands on the canonical file; the pre-existing flat legacy
+        // file is left untouched and inert (it is not migrated here -- a
+        // save that already has stray content split across both spellings
+        // from before this fix needs a separate, explicit migration step,
+        // not included in this change).
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+        char kh_rest[1024];
+        if (g_mnt[i].commit[0] && !strcmp(g_mnt[i].name, "save") &&
+            !strncmp(rest, "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX", sizeof("\\KINGDOM HEARTS HD 1.5+2.5 ReMIX") - 1)) {
+            if (strlcpy(kh_rest, rest, sizeof kh_rest) >= sizeof kh_rest) { errno = ENAMETOOLONG; return 0; }
+            for (char *q = kh_rest; *q; q++) if (*q == '\\') *q = '/';
+            rest = kh_rest;
+        }
+#endif
         if (strstr(rest, "/.")) { if (!norm_rest(rest, normed, sizeof normed)) return 0; rest = normed; }   // only paths with "." components are normalized; the rest walk component by component as before
         if (g_mnt[i].overlay[0] && !create) return rom_overlay_path(&g_mnt[i], rest, out, n);
         strlcpy(out, g_mnt[i].dir, n);
