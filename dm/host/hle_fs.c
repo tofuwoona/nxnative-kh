@@ -90,10 +90,21 @@ static int in_txn_dir(const char *hp) { for (int i = 0; i < g_nmnt; i++) { size_
 static int rm_tree(const char *p);
 // KH2's exported save can contain a legacy flat filename with literal Windows
 // separators. Its runtime also uses slash-separated paths for the same PNG.
-// Clone it into the canonical tree in the *work* directory only; never mutate
-// the committed save here, and never replace a newer canonical copy.
+// This migration is a separate, unproven fix attempt for the save-overwrite
+// bug -- NOT part of the passive diagnostic build. It is off by default and
+// must be explicitly requested with DM_KH2_SAVE_FIX_MIGRATE=1, so a build run
+// with only DM_KH24_DIAG/DM_SAVE_TRACE set is pure observation: it touches no
+// save-path behavior and cannot itself be the cause of what the log shows.
+// When enabled: clone the legacy file into the canonical tree in the *work*
+// directory only; never mutate the committed save here, and never replace a
+// newer canonical copy.
+static int kh2_save_migrate_on(void) {
+    const char *e = getenv("DM_KH2_SAVE_FIX_MIGRATE");
+    return e && *e && strcmp(e, "0");
+}
 static int kh2_save_migrate(const char *work) {
 #if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    if (!kh2_save_migrate_on()) return 0;
     char old[1200], parent[1200], dst[1300];
     snprintf(old, sizeof old, "%s/\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", work);
     snprintf(parent, sizeof parent, "%s/KINGDOM HEARTS HD 1.5+2.5 ReMIX", work);
@@ -101,7 +112,7 @@ static int kh2_save_migrate(const char *work) {
     if (access(old, F_OK) || !access(dst, F_OK)) return 0;
     if (mkdir(parent, 0755) && errno != EEXIST) return -1;
     if (clonefile(old, dst, 0)) return -1;
-    LOG("KH2 save: staged legacy backslash-path file at canonical slash path in work directory; original left untouched");
+    LOG("KH2 save fix (DM_KH2_SAVE_FIX_MIGRATE=1): staged legacy backslash-path file at canonical slash path in work directory; original left untouched");
 #else
     (void)work;
 #endif

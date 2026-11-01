@@ -146,6 +146,7 @@ int main(void) {
 
 #if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
     printf("⑧ KH2 save paths with Windows separators and slash separators refer to the same slot\n");
+    setenv("DM_KH2_SAVE_FIX_MIGRATE", "1", 1);   // this test exercises the opt-in save-fix, not the passive diagnostic build
     g_nmnt = 0;
     snprintf(p, sizeof p, "%s/\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", save); put(p, "old-slot");
     CHECK(h_fs_MountSave("save", NULL) == RES_OK, "remount an exported legacy KH2 save");
