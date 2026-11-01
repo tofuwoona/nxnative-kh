@@ -1296,6 +1296,25 @@ static void begin_rp(rs_t *s, const c_brp *c) {
              (unsigned long)d.depthAttachment.loadAction, (unsigned long)s->st_d);
     }
 }
+// DIAGNOSTIC-ONLY, temporary: full raw-byte hex dump of every UBO bound to the world-geometry
+// shader family (4c1e2f47738ed1ba / d7a52a49f521f4f0 / 8cca46c2723c962d), covering bytes this
+// file's named-field decode in vk_trace_ubo() never looks at. Added to settle whether the
+// per-frame camera view/projection transform lives ANYWHERE in these UBOs' bytes, after the
+// named fields (VPdiag, WorldViewdiag, LocalProjection0diag) showed no camera-correlated change
+// across a confirmed ~90deg camera rotation. Opt-in via DM_VK_UBOTRACE_HEXDUMP=1 (and the
+// existing DM_VK_UBOTRACE=1 / DM_VK_UBOTRACE_MIN_SUBMIT); OFF by default, zero cost otherwise.
+// Remove once the camera-transform location is confirmed and no longer needs raw-byte review.
+static void vk_trace_ubo_hexdump(uint64_t submit, const char *key, uint32_t binding, uint32_t slot, const uint8_t *b, size_t need) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("DM_VK_UBOTRACE_HEXDUMP") != NULL;
+    if (!enabled) return;
+    char hex[2 * 448 + 1]; size_t hn = need < 448 ? need : 448;
+    static const char hexd[] = "0123456789abcdef";
+    for (size_t i = 0; i < hn; i++) { hex[i * 2] = hexd[b[i] >> 4]; hex[i * 2 + 1] = hexd[b[i] & 0xf]; }
+    hex[hn * 2] = 0;
+    VLOG("[UBOTRACE-HEX] submit=%llu key=%s binding=%u slot=%u bytes=%zu hex=%s",
+         (unsigned long long)submit, key, binding, slot, need, hex);
+}
 static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t *e, VkDeviceSize off, int frag) {
     static int enabled = -1, min_init;
     static uint64_t min_submit, last_submit[13];
@@ -1316,6 +1335,7 @@ static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t
     if (id < 0 || logged[id] >= 8 || last_submit[id] == s->sq->v || !e->buf || !e->buf.contents) return;
     if (off > e->buf.length || need > e->buf.length - (NSUInteger)off) return;
     const uint8_t *b = (const uint8_t *)e->buf.contents + (NSUInteger)off;
+    if (id >= 0 && id <= 8) vk_trace_ubo_hexdump(s->sq->v, si->key, r->binding, r->slot, b, need);   // world-geometry family only; see vk_trace_ubo_hexdump
     if (id == 0 || id == 3 || id == 6) {
         float safe, xz, xw, fill, px, py, mx, my, vp[4]; uint32_t fog;
         memcpy(&px, b, 4); memcpy(&py, b + 4, 4); memcpy(&xz, b + 24, 4); memcpy(&xw, b + 28, 4);
@@ -1368,6 +1388,25 @@ static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t
 }
 static void bind_res(rs_t *s, const shinfo *si, int frag) {
     if (!si) return;
+    // DIAGNOSTIC-ONLY, temporary: dump every (kind,set,binding,slot,count) resource entry this
+    // shader declares, once per key, via DM_VK_RESDUMP=1 — to rule out a camera-view/projection
+    // UBO hiding at a binding this file's vk_trace_ubo() dispatch table never looked at.
+    {
+        static int enabled = -1; static char seen[16][17]; static int nseen;
+        if (enabled < 0) enabled = getenv("DM_VK_RESDUMP") != NULL;
+        if (enabled) {
+            int found = 0;
+            for (int k = 0; k < nseen; k++) if (!strcmp(seen[k], si->key)) { found = 1; break; }
+            if (!found && nseen < 16) {
+                strlcpy(seen[nseen++], si->key, 17);
+                for (int i = 0; i < si->nres; i++) {
+                    const shres *r = &si->res[i];
+                    VLOG("[RESDUMP] key=%s frag=%d i=%d kind=%c set=%u binding=%u slot=%u count=%u",
+                         si->key, frag, i, r->kind, r->set, r->binding, r->slot, r->count);
+                }
+            }
+        }
+    }
     id<MTLRenderCommandEncoder> re = s->re;
     for (int i = 0; i < si->nres; i++) {
         const shres *r = &si->res[i];
@@ -1416,6 +1455,7 @@ static void bind_push(rs_t *s, const shinfo *si, int frag) {   // the push-const
         if (frag) [s->re setFragmentBytes:s->pc length:n atIndex:si->res[i].slot]; else [s->re setVertexBytes:s->pc length:n atIndex:si->res[i].slot];
     }
 }
+static void vk_trace_vb_hexdump(rs_t *s, const shinfo *vs);   // diagnostic-only, defined below pre_draw; see its definition for what/why
 static int pre_draw(rs_t *s) {
     if (!s->re && s->cut) resume_rp(s);
     VkPipeline p = s->pipe; id<MTLRenderCommandEncoder> re = s->re;
@@ -1529,7 +1569,41 @@ static int pre_draw(rs_t *s) {
             VkBuffer b = s->vb[i]; if (!b || !b->mem) { RED1("vertex buffer %u not bound", i); return 0; }
             [re setVertexBuffer:mem_buf(b->mem) offset:b->off + s->vbo[i] atIndex:30 - i];
         }
+    vk_trace_vb_hexdump(s, p->vs);   // diagnostic-only, OFF unless DM_VK_VBTRACE_HEXDUMP=1
     return 1;
+}
+// DIAGNOSTIC-ONLY, temporary: raw-byte hex dump of the vertex buffer(s) bound for a draw using
+// one of the world-geometry vertex shaders, to check whether per-frame camera view/projection is
+// instead baked CPU-side into vertex positions before upload (rather than living in a uniform
+// buffer — see vk_trace_ubo_hexdump above, which found no camera-correlated UBO bytes). Opt-in
+// via DM_VK_VBTRACE_HEXDUMP=1 (+ DM_VK_VBTRACE_MIN_SUBMIT, default window 64 submits like the
+// other *TRACE vars); OFF by default, zero cost otherwise. Remove once camera-data location is settled.
+static void vk_trace_vb_hexdump(rs_t *s, const shinfo *vs) {
+    static int enabled = -1, min_init;
+    static uint64_t min_submit, last_submit[3 * 14];
+    static unsigned logged[3 * 14];
+    if (enabled < 0) enabled = getenv("DM_VK_VBTRACE_HEXDUMP") != NULL;
+    if (!min_init) { const char *v = getenv("DM_VK_VBTRACE_MIN_SUBMIT"); min_submit = v ? strtoull(v, NULL, 10) : 0; min_init = 1; }
+    if (!enabled || !vs || !s->sq || s->sq->v < min_submit || s->sq->v > min_submit + 64) return;
+    int base = !strcmp(vs->key, "4c1e2f47738ed1ba") ? 0 : !strcmp(vs->key, "d7a52a49f521f4f0") ? 1 : !strcmp(vs->key, "8cca46c2723c962d") ? 2 : -1;
+    if (base < 0) return;
+    for (uint32_t i = 0; i < 14; i++) {
+        if (!(s->pipe->vb_mask >> i & 1)) continue;
+        int idx = base * 14 + (int)i;
+        if (logged[idx] >= 6 || last_submit[idx] == s->sq->v) continue;
+        VkBuffer vb = s->vb[i]; if (!vb || !vb->mem) continue;
+        id<MTLBuffer> mb = mem_buf(vb->mem); if (!mb || !mb.contents) continue;
+        VkDeviceSize off = vb->off + s->vbo[i];
+        size_t need = 160; if (off > mb.length || need > mb.length - (NSUInteger)off) need = off < mb.length ? (size_t)(mb.length - (NSUInteger)off) : 0;
+        if (!need) continue;
+        const uint8_t *b = (const uint8_t *)mb.contents + (NSUInteger)off;
+        char hex[2 * 160 + 1]; static const char hexd[] = "0123456789abcdef";
+        for (size_t j = 0; j < need; j++) { hex[j * 2] = hexd[b[j] >> 4]; hex[j * 2 + 1] = hexd[b[j] & 0xf]; }
+        hex[need * 2] = 0;
+        VLOG("[VBTRACE-HEX] submit=%llu key=%s vbbinding=%u off=%llu bytes=%zu hex=%s",
+             (unsigned long long)s->sq->v, vs->key, i, (unsigned long long)off, need, hex);
+        last_submit[idx] = s->sq->v; logged[idx]++;
+    }
 }
 static int vk_copy_trace(rs_t *s, unsigned kind) {
     static int enabled = -1, min_init;
