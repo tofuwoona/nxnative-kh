@@ -109,7 +109,7 @@ int main(void) {
     // 6a Recloning after a refused commit fails: do not exit, the work directory is untouched and the committed version unchanged; the next commit is refused again and the reclone succeeds; the transaction after that commits normally
     setenv("DM_TEST_FS_FAILAT", "reclone:1", 1);
     CHECK(write_save("save:/a", "bad") == RES_OK, "write a=bad");
-    save_poison(ENOSPC); int nf0 = g_nfail;   // a save write of this transaction failed
+    save_poison(0, ENOSPC); int nf0 = g_nfail; // a save write of this transaction failed
     CHECK(h_fs_Commit("save") == RES_FAIL && g_nfail == nf0 + 1, "this transaction is refused (injected reclone failure), the process is still alive, front end notified once");
     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "new"), "committed directory a is still new");
     snprintf(p, sizeof p, "%s/a", work); CHECK(same(p, "bad"), "work directory not deleted (a is still bad)");
