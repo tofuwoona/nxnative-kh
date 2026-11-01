@@ -1,0 +1,492 @@
+{
+  "base": "e9ca69cd8fc153a5ea6848992ec11073a2cf2abe",
+  "branch": "fix/kh1-save-hardening",
+  "reviewed_source_commit": "566afc34000535faa9dbb9d5e6730d9dd2e5f218",
+  "reviewed_source_sha256": "32e36ff48977f8e96ef2e65a2174d6960e5a53626fcb521ead5db8e77c3d06f9",
+  "backport_sha256": "31b360fbc530e51febf9632b102800a17502f07fde13bbce9c19df2691099b46",
+  "evidence_root": "/Users/tofu/.hermes/cache/scratch/kh1-save-hardening-evidence",
+  "runs": {
+    "red": {
+      "results_json": "/Users/tofu/.hermes/cache/scratch/kh1-save-hardening-evidence/red/results.json",
+      "results_sha256": "a2f56e4119bf884f0ff14a5cc933d8a8a52a3c6c3e40fa79db7eedd63858b3e8",
+      "source_sha256": "9f7b40039facac980b2b8620f5b215bf84944b697a0a89cf5bfe7863953fceb6",
+      "commands": 278,
+      "failed_commands": 224,
+      "cases": 268,
+      "checks": 1924,
+      "failed_checks": 972,
+      "profiles": {
+        "kh1": {
+          "header_sha256": "a539bc4c2d3d7731be0cb03fd8db34f08be90c48d8564ab116c5faaafcfd3fbe",
+          "groups": {
+            "original": {
+              "invocations": 7,
+              "failed_invocations": 7,
+              "cases": 7,
+              "checks": 18,
+              "failed_checks": 11
+            },
+            "adversarial": {
+              "invocations": 28,
+              "failed_invocations": 20,
+              "cases": 28,
+              "checks": 162,
+              "failed_checks": 54
+            },
+            "r1": {
+              "invocations": 2,
+              "failed_invocations": 2,
+              "cases": 2,
+              "checks": 8,
+              "failed_checks": 6
+            },
+            "seams": {
+              "invocations": 97,
+              "failed_invocations": 83,
+              "cases": 97,
+              "checks": 774,
+              "failed_checks": 415
+            }
+          },
+          "ordinary": {}
+        },
+        "kh2": {
+          "header_sha256": "240478e88197d3fafb232a5d4baf3d9efb338855bfcc6593ebf1c3a43968ad08",
+          "groups": {
+            "original": {
+              "invocations": 7,
+              "failed_invocations": 7,
+              "cases": 7,
+              "checks": 18,
+              "failed_checks": 11
+            },
+            "adversarial": {
+              "invocations": 28,
+              "failed_invocations": 20,
+              "cases": 28,
+              "checks": 162,
+              "failed_checks": 54
+            },
+            "r1": {
+              "invocations": 2,
+              "failed_invocations": 2,
+              "cases": 2,
+              "checks": 8,
+              "failed_checks": 6
+            },
+            "seams": {
+              "invocations": 97,
+              "failed_invocations": 83,
+              "cases": 97,
+              "checks": 774,
+              "failed_checks": 415
+            }
+          },
+          "ordinary": {}
+        }
+      },
+      "warnings": [],
+      "sanitizer_reports": []
+    },
+    "green": {
+      "results_json": "/Users/tofu/.hermes/cache/scratch/kh1-save-hardening-evidence/accepted-green/results.json",
+      "results_sha256": "13591f8ecff984a9194b1e219457eb4fc093ea187c81cabfbbd428336f142e90",
+      "source_sha256": "31b360fbc530e51febf9632b102800a17502f07fde13bbce9c19df2691099b46",
+      "commands": 323,
+      "failed_commands": 0,
+      "cases": 298,
+      "checks": 2074,
+      "failed_checks": 0,
+      "profiles": {
+        "kh1": {
+          "header_sha256": "a539bc4c2d3d7731be0cb03fd8db34f08be90c48d8564ab116c5faaafcfd3fbe",
+          "groups": {
+            "original": {
+              "invocations": 7,
+              "failed_invocations": 0,
+              "cases": 7,
+              "checks": 18,
+              "failed_checks": 0
+            },
+            "adversarial": {
+              "invocations": 28,
+              "failed_invocations": 0,
+              "cases": 28,
+              "checks": 162,
+              "failed_checks": 0
+            },
+            "r1": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 8,
+              "failed_checks": 0
+            },
+            "seams": {
+              "invocations": 97,
+              "failed_invocations": 0,
+              "cases": 97,
+              "checks": 774,
+              "failed_checks": 0
+            },
+            "edges": {
+              "invocations": 13,
+              "failed_invocations": 0,
+              "cases": 13,
+              "checks": 72,
+              "failed_checks": 0
+            },
+            "transport": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 3,
+              "failed_checks": 0
+            }
+          },
+          "ordinary": {
+            "kh1-t_fs": [
+              {
+                "checks": 63,
+                "failed": 0
+              }
+            ],
+            "kh1-t_fs_case": [
+              {
+                "checks": 51,
+                "failed": 0
+              }
+            ],
+            "kh1-t_fs_commit_list": [
+              {
+                "checks": 36,
+                "failed": 0
+              }
+            ]
+          },
+          "synthetic_manifests": {
+            "before": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ],
+            "after": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ]
+          }
+        },
+        "kh2": {
+          "header_sha256": "240478e88197d3fafb232a5d4baf3d9efb338855bfcc6593ebf1c3a43968ad08",
+          "groups": {
+            "original": {
+              "invocations": 7,
+              "failed_invocations": 0,
+              "cases": 7,
+              "checks": 18,
+              "failed_checks": 0
+            },
+            "adversarial": {
+              "invocations": 28,
+              "failed_invocations": 0,
+              "cases": 28,
+              "checks": 162,
+              "failed_checks": 0
+            },
+            "r1": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 8,
+              "failed_checks": 0
+            },
+            "seams": {
+              "invocations": 97,
+              "failed_invocations": 0,
+              "cases": 97,
+              "checks": 774,
+              "failed_checks": 0
+            },
+            "edges": {
+              "invocations": 13,
+              "failed_invocations": 0,
+              "cases": 13,
+              "checks": 72,
+              "failed_checks": 0
+            },
+            "transport": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 3,
+              "failed_checks": 0
+            }
+          },
+          "ordinary": {
+            "kh2-t_fs": [
+              {
+                "checks": 63,
+                "failed": 0
+              }
+            ],
+            "kh2-t_fs_case": [
+              {
+                "checks": 51,
+                "failed": 0
+              }
+            ],
+            "kh2-t_fs_commit_list": [
+              {
+                "checks": 36,
+                "failed": 0
+              }
+            ]
+          },
+          "synthetic_manifests": {
+            "before": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ],
+            "after": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ]
+          }
+        }
+      },
+      "warnings": [],
+      "sanitizer_reports": []
+    },
+    "sanitized": {
+      "results_json": "/Users/tofu/.hermes/cache/scratch/kh1-save-hardening-evidence/accepted-sanitized/results.json",
+      "results_sha256": "5bb8cd3578fc7309aba2e2482294a940a0de8be21dec032e40a3b34312877505",
+      "source_sha256": "31b360fbc530e51febf9632b102800a17502f07fde13bbce9c19df2691099b46",
+      "commands": 323,
+      "failed_commands": 0,
+      "cases": 298,
+      "checks": 2074,
+      "failed_checks": 0,
+      "profiles": {
+        "kh1": {
+          "header_sha256": "a539bc4c2d3d7731be0cb03fd8db34f08be90c48d8564ab116c5faaafcfd3fbe",
+          "groups": {
+            "original": {
+              "invocations": 7,
+              "failed_invocations": 0,
+              "cases": 7,
+              "checks": 18,
+              "failed_checks": 0
+            },
+            "adversarial": {
+              "invocations": 28,
+              "failed_invocations": 0,
+              "cases": 28,
+              "checks": 162,
+              "failed_checks": 0
+            },
+            "r1": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 8,
+              "failed_checks": 0
+            },
+            "seams": {
+              "invocations": 97,
+              "failed_invocations": 0,
+              "cases": 97,
+              "checks": 774,
+              "failed_checks": 0
+            },
+            "edges": {
+              "invocations": 13,
+              "failed_invocations": 0,
+              "cases": 13,
+              "checks": 72,
+              "failed_checks": 0
+            },
+            "transport": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 3,
+              "failed_checks": 0
+            }
+          },
+          "ordinary": {
+            "kh1-t_fs": [
+              {
+                "checks": 63,
+                "failed": 0
+              }
+            ],
+            "kh1-t_fs_case": [
+              {
+                "checks": 51,
+                "failed": 0
+              }
+            ],
+            "kh1-t_fs_commit_list": [
+              {
+                "checks": 36,
+                "failed": 0
+              }
+            ]
+          },
+          "synthetic_manifests": {
+            "before": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ],
+            "after": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ]
+          }
+        },
+        "kh2": {
+          "header_sha256": "240478e88197d3fafb232a5d4baf3d9efb338855bfcc6593ebf1c3a43968ad08",
+          "groups": {
+            "original": {
+              "invocations": 7,
+              "failed_invocations": 0,
+              "cases": 7,
+              "checks": 18,
+              "failed_checks": 0
+            },
+            "adversarial": {
+              "invocations": 28,
+              "failed_invocations": 0,
+              "cases": 28,
+              "checks": 162,
+              "failed_checks": 0
+            },
+            "r1": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 8,
+              "failed_checks": 0
+            },
+            "seams": {
+              "invocations": 97,
+              "failed_invocations": 0,
+              "cases": 97,
+              "checks": 774,
+              "failed_checks": 0
+            },
+            "edges": {
+              "invocations": 13,
+              "failed_invocations": 0,
+              "cases": 13,
+              "checks": 72,
+              "failed_checks": 0
+            },
+            "transport": {
+              "invocations": 2,
+              "failed_invocations": 0,
+              "cases": 2,
+              "checks": 3,
+              "failed_checks": 0
+            }
+          },
+          "ordinary": {
+            "kh2-t_fs": [
+              {
+                "checks": 63,
+                "failed": 0
+              }
+            ],
+            "kh2-t_fs_case": [
+              {
+                "checks": 51,
+                "failed": 0
+              }
+            ],
+            "kh2-t_fs_commit_list": [
+              {
+                "checks": 36,
+                "failed": 0
+              }
+            ]
+          },
+          "synthetic_manifests": {
+            "before": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ],
+            "after": [
+              {
+                "path": "KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png",
+                "size": 7073032,
+                "sha256": "5e8ec8afb45e2f37059fbf704674eac1ecdd912785796ac0346d13fe32172315"
+              },
+              {
+                "path": "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png",
+                "size": 19,
+                "sha256": "5ab1747b745bfad249137cf0e4c90e1b9ae393b94147cb1b70d03d239c5f739c"
+              }
+            ]
+          }
+        }
+      },
+      "warnings": [],
+      "sanitizer_reports": []
+    }
+  }
+}

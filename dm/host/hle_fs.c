@@ -2,7 +2,7 @@
 //   rom   → $DM_ROMFS (default $DM_ROOT/romfs, read-only; the game parses the storage blocks in it itself)
 //   save  → $DM_SAVE (must be set, pointing to this run's copy of the standard save save_ref; if unset, report a failure and abort)
 //   temp  → $DM_TEMP (default $DM_ROOT/run/platform/temp)
-// Paths look like "rom:/data/x". FileHandle / DirectoryHandle are 8 bytes passed by value, here they store the host fd / DIR*.
+// Paths look like "rom:/data/x". FileHandle / DirectoryHandle are 8 bytes passed by value, here an opaque cookie+fd / DIR*.
 // Struct layout follows the public Horizon ABI: DirectoryEntry = {char name[0x301], pad[3], s8 type, pad[3], s64 size} (0x310 bytes).
 #include "hle.h"
 #include <mach/mach.h>
@@ -34,24 +34,40 @@ _Static_assert(sizeof(DirectoryEntry) == 0x310, "DirectoryEntry layout");
 // Save transactions (HLE audit items 1–3): on the real device a save can be rolled back as a whole before commit, and after a crash / kill a remount sees only the version from the last Commit.
 // Host: at mount, the committed directory commit (= $DM_SAVE) is clonefile'd as a whole tree into the working directory <commit>.work (APFS copy-on-write, nearly zero cost), and the mount points at the working directory,
 // all game reads and writes happen in the working directory; Commit = clonefile(work → <commit>.new), then renamex_np(RENAME_SWAP) swaps it atomically with commit, then the swapped-out old version is deleted.
-// Killed at any moment, commit is either the old version or the new version, never half-written / a mix of old and new; the next mount discards leftover .work / .new.
-typedef struct { char name[32]; char dir[1024]; char overlay[4096]; char commit[1024]; int ro; } mount_t;
+// Publication is one directory swap; remount discards leftover .work / .new.
+// This is not a power-loss durability protocol (there are no fsync barriers).
+typedef struct { char name[32]; char dir[1024]; char overlay[4096]; char commit[1024]; int ro, save; } mount_t;
 static mount_t g_mnt[MAX_MOUNT];   // commit non-empty = transactional save mount
 static int g_nmnt;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_path_lock = PTHREAD_MUTEX_INITIALIZER;
-static void path_unlock(pthread_mutex_t **m) { pthread_mutex_unlock(*m); }
+static void path_unlock(pthread_mutex_t **m) { if (*m) { pthread_mutex_unlock(*m); *m = NULL; } }
 #define PATH_LOCK() pthread_mutex_t *path_guard __attribute__((cleanup(path_unlock))) = &g_path_lock; pthread_mutex_lock(path_guard)
 static uint8_t g_fmode[65536];              // fd → open mode
 static uint8_t g_fsave[65536];              // fd → whether it is on a transactional save mount (the save write injection point only counts these)
+// Opaque ABI handles retain the FD in their low word and a non-reused open
+// cookie in the high word. Rollback invalidates without closing an FD: only
+// the matching CloseFile owns it, even after the OS reuses that numeric FD.
+// All table access and mutations use g_path_lock (before g_lock/fslog_lock).
+static uint32_t g_fcookie[65536], g_next_cookie;
+static uint16_t g_fmount[65536];            // transactional mount index + 1
+static uint8_t g_fstale[65536];
+static int file_handle_valid(uint64_t h, int allow_stale) {
+    uint32_t fd = (uint32_t)h;
+    return fd < 65536 && g_fcookie[fd] && g_fcookie[fd] == (h >> 32) && (allow_stale || !g_fstale[fd]);
+}
 static _Atomic int g_save_writes;           // number of writes on the save mount (shared by the injection point and the commit log)
 static _Atomic uint64_t g_txn_first_ns;     // time of this transaction's first save write (used by the commit log to report timing; cleared to 0 at commit)
 // Write failures are refused per transaction: on the real device save space is reserved when the save is created, overwrites cannot fail, and the game does not check the return values of WriteFile / SetFileSize either, it Commits as usual after a failure
 // (after injecting a failure on the 1st write, the committed save file was 0 bytes). When a host write fails (disk full etc., really possible on iOS):
 // if any save write / set-size failed between the last Commit and this Commit, this Commit is refused -- the committed version is unchanged, the working directory is discarded and re-cloned from the committed version,
 // and the front end is notified (front_save_failed); the next transaction (the game's next full save rewrite) is attempted as usual and committed if it succeeds. g_save_poison = errno of the first failure in this transaction (0 = none).
-static _Atomic int g_save_poison;
-static void save_poison(int e) { int z = 0; atomic_compare_exchange_strong(&g_save_poison, &z, e ? e : EIO); }
+static _Atomic int g_save_poison[MAX_MOUNT]; // first mount of each backing transaction owns its poison
+static int save_owner(int i) {
+    for (int k = 0; k < i; k++) if (!strcmp(g_mnt[k].commit, g_mnt[i].commit)) return k;
+    return i;
+}
+static void save_poison(int i, int e) { int z = 0; atomic_compare_exchange_strong(&g_save_poison[save_owner(i)], &z, e ? e : EIO); }
 // The default weak implementation only logs (Mac); the iOS front end provides a strong implementation of the same name that shows a native alert. Called on the game thread, the front end switches to the main thread itself
 __attribute__((weak)) void front_save_failed(int err) { LOG("front_save_failed(errno=%d): no front end attached (default weak implementation)", err); }
 // DM_FSLOG=<file>: each ReadFile logs one TSV line "seconds since boot\tguest path\toffset\tlength\tguest buffer address" (which bytes boot read, for offline reverse lookup against the manifest)
@@ -76,7 +92,19 @@ static int dm_fs_test_fail(const char *pt) {
         q = end ? end + 1 : q + n; }
     return 0;
 }
-static int in_txn_dir(const char *hp) { for (int i = 0; i < g_nmnt; i++) { size_t n = strlen(g_mnt[i].dir); if (g_mnt[i].commit[0] && !strncmp(hp, g_mnt[i].dir, n) && (hp[n] == '/' || !hp[n])) return 1; } return 0; }
+static int in_txn_dir(const char *hp) { for (int i = 0; i < g_nmnt; i++) { size_t n = strlen(g_mnt[i].dir); if (g_mnt[i].commit[0] && !strncmp(hp, g_mnt[i].dir, n) && (hp[n] == '/' || !hp[n])) return i + 1; } return 0; }
+static void save_poison_path(const char *hp, int e) { int m = in_txn_dir(hp); if (m) save_poison(m - 1, e); }
+// Resolution may fail before hp exists. Attribute unexpected host failures by
+// the exact guest mount identity, never a partially resolved physical prefix.
+// Ordinary missing/existing/type/invalid-name probes are not failed saves.
+static void save_poison_guest(const char *path, int e) {
+    if (e == ENOENT || e == ENOTDIR || e == EEXIST || e == EISDIR || e == ENOTEMPTY || e == ENAMETOOLONG || e == EINVAL) return;
+    const char *c = strchr(path, ':');
+    for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == (size_t)(c - path) &&
+        !strncmp(g_mnt[i].name, path, c - path) && !g_mnt[i].ro && g_mnt[i].commit[0]) {
+        save_poison(i, e); return;
+    }
+}
 static int rm_tree(const char *p);
 static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
     PATH_LOCK(); pthread_mutex_lock(&g_lock);
@@ -84,6 +112,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         if (!strcmp(g_mnt[i].name, name)) { pthread_mutex_unlock(&g_lock); return RES_OK; }
     if (g_nmnt >= MAX_MOUNT) die("mount table full");
     strlcpy(g_mnt[g_nmnt].name, name, sizeof g_mnt[0].name);
+    g_mnt[g_nmnt].save = txn; // Mount identity survives read-only staging fallback.
     g_mnt[g_nmnt].ro = ro; g_mnt[g_nmnt].overlay[0] = 0; g_mnt[g_nmnt].commit[0] = 0;
     if (!strcmp(name, "rom") && getenv("DM_ROMFS_OVERLAY"))
         strlcpy(g_mnt[g_nmnt].overlay, getenv("DM_ROMFS_OVERLAY"), sizeof g_mnt[0].overlay);
@@ -104,14 +133,15 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
             LOG("[RED] save transaction: %s (%s, errno=%d) -- mounting the committed directory %s read-only instead: saves cannot be written this session, the committed version is unchanged", why, work, txn_err, dir); }
         else {
             strlcpy(g_mnt[g_nmnt].commit, dir, sizeof g_mnt[0].commit);
-            atomic_store(&g_save_poison, 0);                                // the working directory was just cloned from the committed version, intact
+            atomic_store(&g_save_poison[g_nmnt], 0);                         // new backing transaction, not another mount's failure
             strlcpy(g_mnt[g_nmnt].dir, work, sizeof g_mnt[0].dir); }
     } else strlcpy(g_mnt[g_nmnt].dir, dir, sizeof g_mnt[0].dir);
     g_nmnt++;
     pthread_mutex_unlock(&g_lock);
-    if (txn_err) front_save_failed(txn_err);
     if (!ro && !txn) mkdir(dir, 0755);
     LOG("fs mount %s: → %s%s%s", name, txn ? g_mnt[g_nmnt - 1].dir : dir, ro || txn_err ? " (read-only)" : txn ? " (transactional save: work directory, swapped in atomically on Commit)" : "", g_mnt[g_nmnt - 1].overlay[0] ? " (overlay first)" : "");
+    path_unlock(&path_guard);
+    if (txn_err) front_save_failed(txn_err);
     return RES_OK;
 }
 static Result mount(const char *name, const char *dir, int ro) { return mount_ex(name, dir, ro, 0); }
@@ -179,13 +209,16 @@ static int path_component(char *parent, size_t n, const char *name, int create, 
         }
     }
     DIR *d = opendir(parent); if (!d) return 0;
-    struct dirent *e; char physical[0x301] = "", guest[0x301];
-    while ((e = readdir(d))) {
+    struct dirent *e; char physical[0x301] = "", guest[0x301]; int error = 0;
+    for (;;) {
+        errno = 0; e = readdir(d);
+        if (!e) { error = errno; break; }
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { closedir(d); return 0; }
+        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { error = errno; break; }
         if (!strcmp(guest, name)) { strlcpy(physical, e->d_name, sizeof physical); break; }
     }
-    closedir(d);
+    if (closedir(d) && !error) error = errno;
+    if (error) { errno = error; return 0; }
     if (!physical[0]) {
         if (!create) { errno = ENOENT; return 0; }
         strlcpy(physical, name, sizeof physical);
@@ -281,7 +314,7 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         // not look at the filename, so the same normalization covers both.
 #if DM_GAME_PROGRAM_ID == 0x010090C022978003ull || DM_GAME_PROGRAM_ID == 0x010090C022978001ull
         char kh_rest[1024];
-        if (g_mnt[i].commit[0] && !strcmp(g_mnt[i].name, "save") &&
+        if (g_mnt[i].save && !strcmp(g_mnt[i].name, "save") &&
             !strncmp(rest, "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX", sizeof("\\KINGDOM HEARTS HD 1.5+2.5 ReMIX") - 1)) {
             if (strlcpy(kh_rest, rest, sizeof kh_rest) >= sizeof kh_rest) { errno = ENAMETOOLONG; return 0; }
             for (char *q = kh_rest; *q; q++) if (*q == '\\') *q = '/';
@@ -325,7 +358,8 @@ static Result err_res(const char *op, const char *path) {
     LOG("fs %s %s failed errno=%d", op, path, errno); return RES_FAIL;
 }
 // Name resolution shares one lock with create/rename/enumerate, aliases and xattr are published to the guest together.
-#define HP_EX(path, create) PATH_LOCK(); char hp[1024]; int ro = 0; if (!host_path_ex(path, hp, sizeof hp, &ro, create)) return err_res("path", path)
+#define HP_ACCESS(path, create, mutating) PATH_LOCK(); char hp[1024]; int ro = 0; if (!host_path_ex(path, hp, sizeof hp, &ro, create)) { int e = errno; if (mutating) save_poison_guest(path, e); errno = e; return err_res("path", path); }
+#define HP_EX(path, create) HP_ACCESS(path, create, 0)
 #define HP(path) HP_EX(path, 0)
 #define RW() if (ro) { LOG("fs write to a read-only mount: %s", hp); return RES_FAIL; }
 // Create directory / create file: if the target exists, answer "already exists" as a writable mount would -- that is the only failure the game understands (the original save storage never fails to write); with a generic failure it carries on with a null handle
@@ -529,7 +563,7 @@ uint64_t dm_fs_commit_count(void) { return atomic_load(&g_save_commits); }
 // and mount locks; front-end failure notification is delivered after unlocking.
 static Result commit_mount_locked(int i, int *notify_error) {
     uint64_t tc1 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_txn_first_ns, 0);
-    int perr = atomic_exchange(&g_save_poison, 0);
+    int perr = atomic_exchange(&g_save_poison[save_owner(i)], 0);
     if (perr) {                                                         // a write failed in this transaction: refuse the commit, discard the working directory
         char torn[512] = ""; size_t tl = 0; DIR *d0 = opendir(g_mnt[i].dir); struct dirent *e0;   // record files truncated to 0 bytes (the damage that would enter the save if committed as usual)
         while (d0 && (e0 = readdir(d0))) {
@@ -548,8 +582,14 @@ static Result commit_mount_locked(int i, int *notify_error) {
         if (!access(re, F_OK) && rm_tree(re)) rerr = errno ? errno : EIO;
         else if (dm_fs_test_fail("reclone") || clonefile(g_mnt[i].commit, re, 0)) { rerr = errno ? errno : EIO; rm_tree(re); }
         else if (renamex_np(re, g_mnt[i].dir, RENAME_SWAP)) { rerr = errno ? errno : EIO; rm_tree(re); }
-        else rm_tree(re);                                               // the swapped-out tainted work directory
-        if (rerr) { save_poison(perr); LOG("[RED] save transaction: recloning the work directory failed errno=%d -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged", rerr); }
+        else {
+            // Only handles of this shared backing transaction lose their work
+            // generation. Do not close them here: CloseFile retains ownership.
+            for (int fd = 0; fd < 65536; fd++) if (g_fmount[fd] &&
+                !strcmp(g_mnt[g_fmount[fd] - 1].dir, g_mnt[i].dir)) g_fstale[fd] = 1;
+            rm_tree(re);                                               // swapped-out tainted work
+        }
+        if (rerr) { save_poison(i, perr); LOG("[RED] save transaction: recloning the work directory failed errno=%d -- the work directory is left as it is and stays tainted (the next commit is refused again and retries), the committed version is unchanged", rerr); }
         LOG("[RED] save commit refused: a save write failed in this transaction errno=%d (0-byte files in the work directory: %s); the committed version is unchanged, the work directory %s%s", perr, tl ? torn + 1 : "none", rerr ? "could not be recloned (see the previous line)" : "was recloned from the committed version", nopen ? "; [RED] save files are still open" : "");
         *notify_error = perr;
         return RES_FAIL;
@@ -557,8 +597,8 @@ static Result commit_mount_locked(int i, int *notify_error) {
     char neu[1100]; snprintf(neu, sizeof neu, "%s.new", g_mnt[i].commit);
     Result r = RES_OK;
     if (!access(neu, F_OK)) rm_tree(neu);
-    if (clonefile(g_mnt[i].dir, neu, 0)) { LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, errno); r = RES_FAIL; }
-    else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", errno); rm_tree(neu); r = RES_FAIL; }
+    if (clonefile(g_mnt[i].dir, neu, 0)) { *notify_error = errno ? errno : EIO; LOG("[RED] save commit: clonefile %s failed errno=%d (committed version unchanged)", neu, *notify_error); r = RES_FAIL; }
+    else if (renamex_np(neu, g_mnt[i].commit, RENAME_SWAP)) { *notify_error = errno ? errno : EIO; LOG("[RED] save commit: atomic swap failed errno=%d (committed version unchanged)", *notify_error); rm_tree(neu); r = RES_FAIL; }
     else rm_tree(neu);                                                  // the old version that was swapped out
     // Timing readouts (integer microseconds, no floating point): how long the clone + atomic swap took; how long in total from this transaction's first save write to the end of the commit (the game writing files + the commit; 0 = no save write in this transaction)
     static int n; if (r == RES_OK) { uint64_t tc2 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
@@ -573,6 +613,7 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work d
     if (i == g_nmnt || !g_mnt[i].commit[0]) { pthread_mutex_unlock(&g_lock); return RES_OK; }   // non-transactional mount: nothing to commit
     int notify_error = 0; Result r = commit_mount_locked(i, &notify_error);
     pthread_mutex_unlock(&g_lock);
+    path_unlock(&path_guard);
     if (notify_error) front_save_failed(notify_error);
     return r;
 }
@@ -600,6 +641,7 @@ HLE_FORCE("_ZN2nn2fs6CommitEPKPKci", "fsp-srv; commit a validated mount list sha
     r = target < 0 ? RES_OK : commit_mount_locked(target, &notify_error);
 out:
     pthread_mutex_unlock(&g_lock);
+    path_unlock(&path_guard);
     if (notify_error) front_save_failed(notify_error);
     return r;
 }
@@ -611,23 +653,36 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; the mount table is permanent, unmou
 
 // ---------- Files ----------
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
-    HP(path);
+    HP_ACCESS(path, 0, mode & (MODE_WRITE | MODE_APPEND));
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
     int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
-    if (fd < 0) return err_res("open", hp);
-    struct stat st; fstat(fd, &st);
+    if (fd < 0) { int e = errno;
+        // Missing-file/directory probes are benign; host resource/I/O failures
+        // opening an existing replacement for writing must refuse publication.
+        if ((mode & (MODE_WRITE | MODE_APPEND)) && e != ENOENT && e != ENOTDIR && e != EISDIR) save_poison_path(hp, e);
+        errno = e; return err_res("open", hp);
+    }
+    struct stat st;
+    if (fstat(fd, &st)) { int e = errno; close(fd); if (mode & (MODE_WRITE | MODE_APPEND)) save_poison_path(hp, e); errno = e; return err_res("open stat", hp); }
     if (S_ISDIR(st.st_mode)) { close(fd); return RES_PATH_NOT_FOUND; }
     if (fd >= (int)sizeof g_fmode) die("fd beyond the table");
-    g_fmode[fd] = (uint8_t)mode; *out = (uint64_t)fd;
+    g_fmode[fd] = (uint8_t)mode; g_fstale[fd] = 0; g_fmount[fd] = 0;
+    if (!++g_next_cookie) die("file handle cookie exhausted");
+    g_fcookie[fd] = g_next_cookie; *out = ((uint64_t)g_next_cookie << 32) | (uint32_t)fd;
     { const char *c = strchr(path, ':'); size_t ln = c ? (size_t)(c - path) : 0; g_fsave[fd] = 0;
-      for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln)) g_fsave[fd] = g_mnt[i].commit[0] != 0; }
+      for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == ln && !strncmp(g_mnt[i].name, path, ln)) {
+          g_fsave[fd] = g_mnt[i].commit[0] != 0; if (g_fsave[fd]) g_fmount[fd] = i + 1;
+      } }
     fslog_init();
     if (g_fslog && fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = strdup(path); pthread_mutex_unlock(&g_fslog_lock); }
     if (g_flag.fs) LOG("fs open [%.2fs] %s mode=%d → fd %d", (now_ns() - g_t0_ns) / 1e9, path, mode, fd);
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", Result, h_fs_ReadFile, size_t *out, uint64_t h, int64_t off, void *buf, size_t sz) {
-    if (!h) { *out = 0; return RES_FAIL; }   // a file handle is an fd; 0 is stdin and never a file the game opened: the null handle the game keeps using after a failed open
+    // Validate briefly before I/O; concurrent RomFS reads stay concurrent.
+    // Concurrent CloseFile/read of one handle is invalid
+    // SDK usage; an already-started read may finish on its old snapshot.
+    { PATH_LOCK(); if (!file_handle_valid(h, 0)) { *out = 0; return RES_FAIL; } }
     size_t got = 0; int reprep = 0;
     dm_guest_write_prepare(buf, sz);   // The destination may be a texture pool page write-protected by the graphics layer: a kernel write to a read-only page returns EFAULT instead of page-faulting, so unprotect and mark dirty first
     while (got < sz) {
@@ -664,7 +719,8 @@ HLE_FORCE("_ZN2nn2fs8ReadFileEPmNS0_10FileHandleElPvm", "fsp-srv → pread(2)", 
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp-srv → pwrite(2)", Result, h_fs_WriteFile, uint64_t h, int64_t off, const void *buf, size_t sz, const void *opt) {
-    if (!h) return RES_FAIL;
+    PATH_LOCK(); // Serialize the complete write (including poison) with Commit.
+    if (!file_handle_valid(h, 0)) return RES_FAIL;
     (void)opt; size_t put = 0;
     if (g_fsave[(int)h & 0xffff]) {                                     // Save write injection point (for deterministic regression; only writes on the save mount are counted)
         static int cfg = -1, kill_n, fail_n, fail_e;
@@ -675,75 +731,92 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
         int n = atomic_fetch_add(&g_save_writes, 1) + 1;
         { uint64_t z = 0; atomic_compare_exchange_strong(&g_txn_first_ns, &z, clock_gettime_nsec_np(CLOCK_MONOTONIC)); }
         if (kill_n && n == kill_n) { LOG("DM_TEST_KILL_AT: save write #%d, calling _exit (simulates being killed mid-write)", n); _exit(9); }
-        if (fail_n && n == fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, fail_e); errno = fail_e; save_poison(fail_e); return err_res("pwrite (injected)", "fd"); }
+        if (fail_n && n == fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, fail_e); errno = fail_e; save_poison(g_fmount[(int)h] - 1, fail_e); return err_res("pwrite (injected)", "fd"); }
     }
     while (put < sz) {
         ssize_t r = pwrite((int)h, (const uint8_t *)buf + put, sz - put, off + put);
-        if (r < 0) { if (errno == EINTR) continue; if (g_fsave[(int)h & 0xffff]) save_poison(errno); return err_res("pwrite", "fd"); }
-        if (r == 0) { errno = ENOSPC; if (g_fsave[(int)h & 0xffff]) save_poison(ENOSPC); return err_res("pwrite (wrote 0 bytes)", "fd"); }   // This used to loop forever here
+        if (r < 0) { if (errno == EINTR) continue; int e = errno; if (g_fsave[(int)h & 0xffff]) save_poison(g_fmount[(int)h] - 1, e); errno = e; return err_res("pwrite", "fd"); }
+        if (r == 0) { errno = ENOSPC; if (g_fsave[(int)h & 0xffff]) save_poison(g_fmount[(int)h] - 1, ENOSPC); return err_res("pwrite (wrote 0 bytes)", "fd"); }   // This used to loop forever here
         put += r;
     }
     return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11GetFileSizeEPlNS0_10FileHandleE", "fsp-srv → fstat(2)", Result, h_fs_GetFileSize, int64_t *out, uint64_t h) {
-    if (!h) return RES_FAIL;
+    PATH_LOCK(); if (!file_handle_valid(h, 0)) return RES_FAIL;
     struct stat st; if (fstat((int)h, &st)) return err_res("fstat", "fd");
     *out = st.st_size; return RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs11SetFileSizeENS0_10FileHandleEl", "fsp-srv → ftruncate(2)", Result, h_fs_SetFileSize, uint64_t h, int64_t sz) {
-    if (!h) return RES_FAIL;
+    PATH_LOCK(); if (!file_handle_valid(h, 0)) return RES_FAIL;
     if (!ftruncate((int)h, sz)) return RES_OK;
-    if (g_fsave[(int)h & 0xffff]) save_poison(errno);
-    return err_res("ftruncate", "fd");
+    int e = errno;
+    if (g_fsave[(int)h & 0xffff]) save_poison(g_fmount[(int)h] - 1, e);
+    errno = e; return err_res("ftruncate", "fd");
 }
-HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { (void)h; return RES_OK; }
+HLE_FORCE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", "fsp-srv; host writes are already in the page cache, flushing is a no-op", Result, h_fs_FlushFile, uint64_t h) { PATH_LOCK(); return file_handle_valid(h, 0) ? RES_OK : RES_FAIL; }
 HLE_FORCE("_ZN2nn2fs9CloseFileENS0_10FileHandleE", "fsp-srv → close(2)", void, h_fs_CloseFile, uint64_t h) {
-    if (!h) return;   // the null handle after a failed open (see ReadFile): do not touch fd 0
-    g_fmode[(int)h & 0xffff] = 0; g_fsave[(int)h & 0xffff] = 0;
-    close((int)h); }
-HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { return g_fmode[(int)h & 0xffff]; }
+    PATH_LOCK(); if (!file_handle_valid(h, 1)) return;
+    int fd = (int)h;
+    g_fmode[fd] = 0; g_fsave[fd] = 0; g_fcookie[fd] = 0; g_fmount[fd] = 0; g_fstale[fd] = 0;
+    if (fd < 4096) { pthread_mutex_lock(&g_fslog_lock); free(g_fdpath[fd]); g_fdpath[fd] = NULL; pthread_mutex_unlock(&g_fslog_lock); }
+    close(fd); }
+HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mode is recorded by the host", int, h_fs_GetFileOpenMode, uint64_t h) { PATH_LOCK(); return file_handle_valid(h, 0) ? g_fmode[(int)h] : 0; }
 
 // ---------- Path operations ----------
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) {
-    HP_EX(path, 1); RW_CREATE();
+    HP_ACCESS(path, 1, 1); RW_CREATE();
     int fd = open(hp, O_WRONLY | O_CREAT | O_EXCL, 0644);
-    if (fd < 0) return err_res("create", hp);
+    if (fd < 0) { int e = errno; if (e != EEXIST) save_poison_path(hp, e); errno = e; return err_res("create", hp); }
     int rc = ftruncate(fd, sz); int e = errno; close(fd);
     if (!rc && set_guest_name(hp, path)) { rc = -1; e = errno; }
-    if (rc) unlink(hp);
+    if (rc) { save_poison_path(hp, e); unlink(hp); }
     errno = e; return rc ? err_res("create", hp) : RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs10DeleteFileEPKc", "fsp-srv → unlink(2)", Result, h_fs_DeleteFile, const char *path) { HP(path); RW(); return unlink(hp) ? err_res("unlink", hp) : RES_OK; }
-HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs_CreateDirectory, const char *path) { HP_EX(path, 1); RW_CREATE();
-    if (mkdir(hp, 0755)) return err_res("mkdir", hp);
-    if (set_guest_name(hp, path)) { int e = errno; rmdir(hp); errno = e; return err_res("mkdir name", hp); }
-    return RES_OK; }
-static int rm_tree(const char *p) {
-    DIR *d = opendir(p); if (!d) return -1;
-    struct dirent *e; char c[1024]; int rc = 0;
-    while ((e = readdir(d))) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(c, sizeof c, "%s/%s", p, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+HLE_FORCE("_ZN2nn2fs10DeleteFileEPKc", "fsp-srv → unlink(2)", Result, h_fs_DeleteFile, const char *path) {
+    HP_ACCESS(path, 0, 1); RW();
+    if (dm_fs_test_fail("delete") || unlink(hp)) {
+        int e = errno;
+        if (in_txn_dir(hp)) { save_poison_path(hp, e); }
+        errno = e; return err_res("unlink", hp);
     }
-    closedir(d);
-    return rc | rmdir(p);
+    return RES_OK;
+}
+HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs_CreateDirectory, const char *path) { HP_ACCESS(path, 1, 1); RW_CREATE();
+    if (mkdir(hp, 0755)) { int e = errno; if (e != EEXIST) save_poison_path(hp, e); errno = e; return err_res("mkdir", hp); }
+    if (set_guest_name(hp, path)) { int e = errno; save_poison_path(hp, e); rmdir(hp); errno = e; return err_res("mkdir name", hp); }
+    return RES_OK; }
+static int clean_tree(const char *p) {
+    DIR *d = opendir(p); if (!d) return -1;
+    struct dirent *e; char c[1024]; int first = 0;
+    for (;;) {
+        errno = 0; e = readdir(d);
+        if (!e) { if (errno && !first) first = errno; break; }
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        int rc;
+        if (snprintf(c, sizeof c, "%s/%s", p, e->d_name) >= (int)sizeof c) { errno = ENAMETOOLONG; rc = -1; }
+        else rc = e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
+        if (rc && !first) first = errno ? errno : EIO;
+    }
+    if (closedir(d) && !first) first = errno ? errno : EIO;
+    if (first) { errno = first; return -1; }
+    return 0;
+}
+static int rm_tree(const char *p) {
+    if (clean_tree(p)) return -1;
+    return rmdir(p);
 }
 HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → recursive delete (only inside writable mounts)", Result, h_fs_DeleteDirRec, const char *path) {
-    HP(path); RW(); return rm_tree(hp) ? err_res("rmtree", hp) : RES_OK;
+    HP_ACCESS(path, 0, 1); RW();
+    if (!rm_tree(hp)) return RES_OK;
+    int e = errno; save_poison_path(hp, e);
+    errno = e; return err_res("rmtree", hp);
 }
 // empty a directory and keep the directory itself (13 Sentinels)
 HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv → recursively deletes the directory's contents and keeps the directory (only inside writable mounts)", Result, h_fs_CleanDirRec, const char *path) {
-    HP(path); RW();
-    DIR *d = opendir(hp); if (!d) return err_res("cleandir", hp);
-    struct dirent *e; char c[1024]; int rc = 0;
-    while ((e = readdir(d))) {
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        snprintf(c, sizeof c, "%s/%s", hp, e->d_name);
-        rc |= e->d_type == DT_DIR ? rm_tree(c) : unlink(c);
-    }
-    closedir(d);
-    return rc ? err_res("cleandir", hp) : RES_OK;
+    HP_ACCESS(path, 0, 1); RW();
+    if (!clean_tree(hp)) return RES_OK;
+    int e = errno; save_poison_path(hp, e);
+    errno = e; return err_res("cleandir", hp);
 }
 // file data cache (a global read cache in the fs process): the host reads through the page cache and leaves the buffer unused
 HLE_FORCE("_ZN2nn2fs25EnableGlobalFileDataCacheEPvm", "fsp-srv global read cache; unused by the host", void, h_fs_EnableGlobalCache, void *buf, size_t sz) { (void)buf; (void)sz; }
@@ -755,16 +828,19 @@ HLE_FORCE("_ZN2nn2fs30DisableIndividualFileDataCacheEPKc", "fsp-srv read cache f
 HLE_FORCE("_ZN2nn2fs26DisableGlobalFileDataCacheEv", "fsp-srv global read cache; unused by the host (DRAGON QUEST XI S's nninitStartup turns it off again after its start-up thread)", void, h_fs_DisableGlobalCache, void) {}
 // SDK 11 (Metroid Dread): delete an empty directory
 HLE_FORCE("_ZN2nn2fs15DeleteDirectoryEPKc", "fsp-srv → rmdir(2) (the directory must be empty)", Result, h_fs_DeleteDir, const char *path) {
-    HP(path); RW(); return rmdir(hp) ? err_res("rmdir", hp) : RES_OK;
+    HP_ACCESS(path, 0, 1); RW();
+    if (!rmdir(hp)) return RES_OK;
+    int e = errno; save_poison_guest(path, e); errno = e; return err_res("rmdir", hp);
 }
 static Result rename_entry(const char *from, const char *to) {
-    HP(from); RW(); char hp2[1024];
-    if (!host_path_ex(to, hp2, sizeof hp2, NULL, 1)) return err_res("rename path", to);
+    HP_ACCESS(from, 0, 1); RW(); char hp2[1024];
+    if (!host_path_ex(to, hp2, sizeof hp2, NULL, 1)) { int e = errno; save_poison_guest(from, e); save_poison_guest(to, e); errno = e; return err_res("rename path", to); }
     if (!access(hp2, F_OK)) return RES_PATH_EXISTS;
-    if (rename(hp, hp2)) return err_res("rename", hp);
+    if (errno != ENOENT && errno != ENOTDIR) { int e = errno; save_poison_guest(from, e); save_poison_guest(to, e); errno = e; return err_res("rename probe", to); }
+    if (rename(hp, hp2)) { int e = errno; save_poison_guest(from, e); save_poison_guest(to, e); errno = e; return err_res("rename", hp); }
     if (dm_fs_test_fail("guestname") || set_guest_name(hp2, to)) { int e = errno ? errno : EIO;
         if (dm_fs_test_fail("renameback") || rename(hp2, hp)) {   // the rollback fails too: the file stays at the new path with wrong guest-name metadata; do not exit -- inside a transactional save, this transaction's commit is refused (committed version unchanged; recloning restores it)
-            LOG("[RED] fs rename: writing the name metadata failed and so did the rollback errno=%d: %s stays at the new path%s", errno, hp2, in_txn_dir(hp2) ? ", this transaction's save commit will be refused" : ""); if (in_txn_dir(hp2)) save_poison(e); }
+            LOG("[RED] fs rename: writing the name metadata failed and so did the rollback errno=%d: %s stays at the new path%s", errno, hp2, in_txn_dir(hp2) ? ", this transaction's save commit will be refused" : ""); save_poison_path(hp2, e); }
         errno = e; return err_res("rename name", hp2); }
     return RES_OK;
 }
