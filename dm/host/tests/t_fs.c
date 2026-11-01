@@ -137,24 +137,29 @@ int main(void) {
     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "committed a = ok3");
     unsetenv("DM_SAVE"); g_nmnt = 0;
 
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull || DM_GAME_PROGRAM_ID == 0x010090C022978001ull
 #if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
-    printf("⑦ KH2 save paths with Windows separators and slash separators resolve to the same file\n");
+#define KH_SAVE_FILE "KHIIFM.png"
+#else
+#define KH_SAVE_FILE "KHFM.png"
+#endif
+    printf("⑦ KH save paths with Windows separators and slash separators resolve to the same file (" KH_SAVE_FILE ")\n");
     snprintf(save, sizeof save, "%s/save2", root); snprintf(work, sizeof work, "%s.work", save);
     mkdir(save, 0755);
     char dir2[1200]; snprintf(dir2, sizeof dir2, "%s/KINGDOM HEARTS HD 1.5+2.5 ReMIX", save); mkdir(dir2, 0755);
-    snprintf(p, sizeof p, "%s/KHIIFM.png", dir2); put(p, "original");
+    snprintf(p, sizeof p, "%s/" KH_SAVE_FILE, dir2); put(p, "original");
     setenv("DM_SAVE", save, 1);
     CHECK(h_fs_MountSave("save", NULL) == RES_OK, "mount a save whose canonical file already exists");
-    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", got, sizeof got) && !strcmp(got, "original"),
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\" KH_SAVE_FILE, got, sizeof got) && !strcmp(got, "original"),
           "the backslash guest path reads the same file as the canonical slash path");
-    CHECK(write_save("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", "written-via-backslash") == RES_OK,
+    CHECK(write_save("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\" KH_SAVE_FILE, "written-via-backslash") == RES_OK,
           "write through the backslash guest path");
     CHECK(h_fs_Commit("save") == RES_OK, "commit");
     CHECK(same(p, "written-via-backslash"), "the canonical slash-path file on disk has the new content");
-    CHECK(read_fs("save:/KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png", got, sizeof got) && !strcmp(got, "written-via-backslash"),
+    CHECK(read_fs("save:/KINGDOM HEARTS HD 1.5+2.5 ReMIX/" KH_SAVE_FILE, got, sizeof got) && !strcmp(got, "written-via-backslash"),
           "a read through the slash guest path sees the same write");
     g_nmnt = 0; CHECK(h_fs_MountSave("save", NULL) == RES_OK, "restart with the committed save");
-    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", got, sizeof got) && !strcmp(got, "written-via-backslash"),
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\" KH_SAVE_FILE, got, sizeof got) && !strcmp(got, "written-via-backslash"),
           "after restart the backslash load sees the new content, not an old flat file");
 #endif
 

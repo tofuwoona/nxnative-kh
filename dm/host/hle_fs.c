@@ -275,7 +275,11 @@ static int host_path_ex(const char *p, char *out, size_t n, int *ro, int create)
         // save that already has stray content split across both spellings
         // from before this fix needs a separate, explicit migration step,
         // not included in this change).
-#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+        // KH1's export (Program 1, 010090c022978001) uses the identical
+        // "\KINGDOM HEARTS HD 1.5+2.5 ReMIX\" folder prefix as KH2's, just
+        // with KHFM.png instead of KHIIFM.png -- the prefix check below does
+        // not look at the filename, so the same normalization covers both.
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull || DM_GAME_PROGRAM_ID == 0x010090C022978001ull
         char kh_rest[1024];
         if (g_mnt[i].commit[0] && !strcmp(g_mnt[i].name, "save") &&
             !strncmp(rest, "\\KINGDOM HEARTS HD 1.5+2.5 ReMIX", sizeof("\\KINGDOM HEARTS HD 1.5+2.5 ReMIX") - 1)) {
