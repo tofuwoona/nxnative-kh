@@ -90,6 +90,11 @@ mkdir -p Gen/dm/font && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial
 # It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
 # The catalog is always created (the project always lists it, see project.yml); without an icon it stays empty and DM_APPICON is not set
 ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
+# Direct KH2's split Program 3 RomFS has no adjacent control icon. Never
+# silently ship its blank icon, or ignore a misspelled explicit icon path.
+if [ ! -f "$ICON" ] && { [ "$GAME" = 010090C022978003 ] || [ -n "${DM_ICON:-}" ]; }; then
+  die "app icon missing: $ICON; set DM_ICON to the existing game icon"
+fi
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"
