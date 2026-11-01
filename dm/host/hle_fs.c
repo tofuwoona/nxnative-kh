@@ -108,6 +108,17 @@ static int dm_fs_test_fail(const char *pt) {
 }
 static int in_txn_dir(const char *hp) { for (int i = 0; i < g_nmnt; i++) { size_t n = strlen(g_mnt[i].dir); if (g_mnt[i].commit[0] && !strncmp(hp, g_mnt[i].dir, n) && (hp[n] == '/' || !hp[n])) return i + 1; } return 0; }
 static void save_poison_path(const char *hp, int e) { int m = in_txn_dir(hp); if (m) save_poison(m - 1, e); }
+// Resolution may fail before hp exists. Attribute unexpected host failures by
+// the exact guest mount identity, never a partially resolved physical prefix.
+// Ordinary missing/existing/type/invalid-name probes are not failed saves.
+static void save_poison_guest(const char *path, int e) {
+    if (e == ENOENT || e == ENOTDIR || e == EEXIST || e == EISDIR || e == ENOTEMPTY || e == ENAMETOOLONG || e == EINVAL) return;
+    const char *c = strchr(path, ':');
+    for (int i = 0; c && i < g_nmnt; i++) if (strlen(g_mnt[i].name) == (size_t)(c - path) &&
+        !strncmp(g_mnt[i].name, path, c - path) && !g_mnt[i].ro && g_mnt[i].commit[0]) {
+        save_poison(i, e); return;
+    }
+}
 static int rm_tree(const char *p);
 // KH2's exported save can contain a legacy flat filename with literal Windows
 // separators. Its runtime also uses slash-separated paths for the same PNG.
@@ -243,13 +254,16 @@ static int path_component(char *parent, size_t n, const char *name, int create, 
         }
     }
     DIR *d = opendir(parent); if (!d) return 0;
-    struct dirent *e; char physical[0x301] = "", guest[0x301];
-    while ((e = readdir(d))) {
+    struct dirent *e; char physical[0x301] = "", guest[0x301]; int error = 0;
+    for (;;) {
+        errno = 0; e = readdir(d);
+        if (!e) { error = errno; break; }
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { closedir(d); return 0; }
+        if (!guest_name(parent, e->d_name, guest, sizeof guest)) { error = errno; break; }
         if (!strcmp(guest, name)) { strlcpy(physical, e->d_name, sizeof physical); break; }
     }
-    closedir(d);
+    if (closedir(d) && !error) error = errno;
+    if (error) { errno = error; return 0; }
     if (!physical[0]) {
         if (!create) { errno = ENOENT; return 0; }
         strlcpy(physical, name, sizeof physical);
@@ -375,7 +389,8 @@ static Result err_res(const char *op, const char *path) {
     LOG("fs %s %s failed errno=%d", op, path, errno); return RES_FAIL;
 }
 // Name resolution shares one lock with create/rename/enumerate, aliases and xattr are published to the guest together.
-#define HP_EX(path, create) PATH_LOCK(); char hp[1024]; int ro = 0; if (!host_path_ex(path, hp, sizeof hp, &ro, create)) return err_res("path", path)
+#define HP_ACCESS(path, create, mutating) PATH_LOCK(); char hp[1024]; int ro = 0; if (!host_path_ex(path, hp, sizeof hp, &ro, create)) { int e = errno; if (mutating) save_poison_guest(path, e); errno = e; return err_res("path", path); }
+#define HP_EX(path, create) HP_ACCESS(path, create, 0)
 #define HP(path) HP_EX(path, 0)
 #define RW() if (ro) { LOG("fs write to a read-only mount: %s", hp); return RES_FAIL; }
 // Create directory / create file: if the target exists, answer "already exists" as a writable mount would -- that is the only failure the game understands (the original save storage never fails to write); with a generic failure it carries on with a null handle
@@ -678,7 +693,7 @@ HLE_FORCE("_ZN2nn2fs7UnmountEPKc", "fsp-srv; the mount table is permanent, unmou
 
 // ---------- Files ----------
 HLE_FORCE("_ZN2nn2fs8OpenFileEPNS0_10FileHandleEPKci", "fsp-srv → open(2)", Result, h_fs_OpenFile, uint64_t *out, const char *path, int mode) {
-    HP(path);
+    HP_ACCESS(path, 0, mode & (MODE_WRITE | MODE_APPEND));
     if (mode & (MODE_WRITE | MODE_APPEND)) RW();
     int fd = open(hp, (mode & (MODE_WRITE | MODE_APPEND)) ? ((mode & MODE_READ) ? O_RDWR : O_WRONLY) : O_RDONLY);
     if (fd < 0) { int e = errno;
@@ -795,7 +810,7 @@ HLE_FORCE("_ZN2nn2fs15GetFileOpenModeENS0_10FileHandleE", "fsp-srv; the open mod
 
 // ---------- Path operations ----------
 HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftruncate", Result, h_fs_CreateFile, const char *path, int64_t sz) {
-    HP_EX(path, 1); RW_CREATE();
+    HP_ACCESS(path, 1, 1); RW_CREATE();
     int fd = open(hp, O_WRONLY | O_CREAT | O_EXCL, 0644);
     if (fd < 0) { int e = errno; if (e != EEXIST) save_poison_path(hp, e); errno = e; return err_res("create", hp); }
     int rc = ftruncate(fd, sz); int e = errno; close(fd);
@@ -805,7 +820,7 @@ HLE_FORCE("_ZN2nn2fs10CreateFileEPKcl", "fsp-srv → open(O_CREAT|O_EXCL)+ftrunc
     errno = e; return rc ? err_res("create", hp) : RES_OK;
 }
 HLE_FORCE("_ZN2nn2fs10DeleteFileEPKc", "fsp-srv → unlink(2)", Result, h_fs_DeleteFile, const char *path) {
-    HP(path); RW();
+    HP_ACCESS(path, 0, 1); RW();
     if (dm_fs_test_fail("delete") || unlink(hp)) {
         int e = errno;
         if (in_txn_dir(hp)) { save_poison_path(hp, e); if (save_trace_on()) LOG("[save-trace] delete %s failed errno=%d", path, e); }
@@ -814,7 +829,7 @@ HLE_FORCE("_ZN2nn2fs10DeleteFileEPKc", "fsp-srv → unlink(2)", Result, h_fs_Del
     if (in_txn_dir(hp) && save_trace_on()) LOG("[save-trace] delete %s ok", path);
     return RES_OK;
 }
-HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs_CreateDirectory, const char *path) { HP_EX(path, 1); RW_CREATE();
+HLE_FORCE("_ZN2nn2fs15CreateDirectoryEPKc", "fsp-srv → mkdir(2)", Result, h_fs_CreateDirectory, const char *path) { HP_ACCESS(path, 1, 1); RW_CREATE();
     if (mkdir(hp, 0755)) { int e = errno; if (e != EEXIST) save_poison_path(hp, e); errno = e; return err_res("mkdir", hp); }
     if (set_guest_name(hp, path)) { int e = errno; save_poison_path(hp, e); rmdir(hp); errno = e; return err_res("mkdir name", hp); }
     return RES_OK; }
@@ -839,14 +854,14 @@ static int rm_tree(const char *p) {
     return rmdir(p);
 }
 HLE_FORCE("_ZN2nn2fs26DeleteDirectoryRecursivelyEPKc", "fsp-srv → recursive delete (only inside writable mounts)", Result, h_fs_DeleteDirRec, const char *path) {
-    HP(path); RW();
+    HP_ACCESS(path, 0, 1); RW();
     if (!rm_tree(hp)) return RES_OK;
     int e = errno; save_poison_path(hp, e);
     errno = e; return err_res("rmtree", hp);
 }
 // empty a directory and keep the directory itself (13 Sentinels)
 HLE_FORCE("_ZN2nn2fs25CleanDirectoryRecursivelyEPKc", "fsp-srv → recursively deletes the directory's contents and keeps the directory (only inside writable mounts)", Result, h_fs_CleanDirRec, const char *path) {
-    HP(path); RW();
+    HP_ACCESS(path, 0, 1); RW();
     if (!clean_tree(hp)) return RES_OK;
     int e = errno; save_poison_path(hp, e);
     errno = e; return err_res("cleandir", hp);
@@ -861,13 +876,16 @@ HLE_FORCE("_ZN2nn2fs30DisableIndividualFileDataCacheEPKc", "fsp-srv read cache f
 HLE_FORCE("_ZN2nn2fs26DisableGlobalFileDataCacheEv", "fsp-srv global read cache; unused by the host (DRAGON QUEST XI S's nninitStartup turns it off again after its start-up thread)", void, h_fs_DisableGlobalCache, void) {}
 // SDK 11 (Metroid Dread): delete an empty directory
 HLE_FORCE("_ZN2nn2fs15DeleteDirectoryEPKc", "fsp-srv → rmdir(2) (the directory must be empty)", Result, h_fs_DeleteDir, const char *path) {
-    HP(path); RW(); return rmdir(hp) ? err_res("rmdir", hp) : RES_OK;
+    HP_ACCESS(path, 0, 1); RW();
+    if (!rmdir(hp)) return RES_OK;
+    int e = errno; save_poison_guest(path, e); errno = e; return err_res("rmdir", hp);
 }
 static Result rename_entry(const char *from, const char *to) {
-    HP(from); RW(); char hp2[1024];
-    if (!host_path_ex(to, hp2, sizeof hp2, NULL, 1)) return err_res("rename path", to);
+    HP_ACCESS(from, 0, 1); RW(); char hp2[1024];
+    if (!host_path_ex(to, hp2, sizeof hp2, NULL, 1)) { int e = errno; save_poison_guest(from, e); save_poison_guest(to, e); errno = e; return err_res("rename path", to); }
     if (!access(hp2, F_OK)) return RES_PATH_EXISTS;
-    if (rename(hp, hp2)) return err_res("rename", hp);
+    if (errno != ENOENT && errno != ENOTDIR) { int e = errno; save_poison_guest(from, e); save_poison_guest(to, e); errno = e; return err_res("rename probe", to); }
+    if (rename(hp, hp2)) { int e = errno; save_poison_guest(from, e); save_poison_guest(to, e); errno = e; return err_res("rename", hp); }
     if (dm_fs_test_fail("guestname") || set_guest_name(hp2, to)) { int e = errno ? errno : EIO;
         if (dm_fs_test_fail("renameback") || rename(hp2, hp)) {   // the rollback fails too: the file stays at the new path with wrong guest-name metadata; do not exit -- inside a transactional save, this transaction's commit is refused (committed version unchanged; recloning restores it)
             LOG("[RED] fs rename: writing the name metadata failed and so did the rollback errno=%d: %s stays at the new path%s", errno, hp2, in_txn_dir(hp2) ? ", this transaction's save commit will be refused" : ""); save_poison_path(hp2, e); }
