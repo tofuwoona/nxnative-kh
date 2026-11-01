@@ -20,14 +20,14 @@ static char *g_argv[4]; static int g_argc;
 typedef struct { char *active, *previous; } diag_log_paths;
 static void *diag_log_rotate_thread(void *arg) {
     diag_log_paths *paths = arg;
-    // 20ms poll: worst-case overshoot past the 1 GiB limit is bounded by
+    // 20ms poll: worst-case overshoot past the 4 GiB limit is bounded by
     // however much the game's combined log output can produce in 20ms
     // (thousands of lines/sec at most in practice), not an unbounded burst.
     for (;;) {
         usleep(20000);
         flockfile(stderr);
-        int result = dm_log_rotate_file(stderr, paths->active, paths->previous, UINT64_C(1) << 30);
-        if (result > 0) fprintf(stderr, "[kh2-diag] log rotated at 1 GiB; previous segment overwritten\n");
+        int result = dm_log_rotate_file(stderr, paths->active, paths->previous, UINT64_C(4) << 30);
+        if (result > 0) fprintf(stderr, "[kh2-diag] log rotated at 4 GiB; previous segment overwritten\n");
         else if (result < 0) fprintf(stderr, "[RED] kh2 diagnostic log rotation failed errno=%d\n", errno);
         funlockfile(stderr);
     }
@@ -78,7 +78,7 @@ static int boot_env(void) {
         pthread_t thread;
         if (!paths || !paths->active || !paths->previous || pthread_create(&thread, NULL, diag_log_rotate_thread, paths)) {
             fprintf(stderr, "[RED] KH2 continuous diagnostic log rotation could not start\n");
-        } else { pthread_detach(thread); fprintf(stderr, "[kh2-diag] continuous save/write and Vulkan-to-Metal pass logs enabled; log.txt and log.prev.txt rotate at 1 GiB each\n"); }
+        } else { pthread_detach(thread); fprintf(stderr, "[kh2-diag] continuous save/write, input, and Vulkan-to-Metal pass logs enabled; log.txt and log.prev.txt rotate at 4 GiB each (8 GiB maximum)\n"); }
     }
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when the process makes its first device (the early loading below may make it)
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG

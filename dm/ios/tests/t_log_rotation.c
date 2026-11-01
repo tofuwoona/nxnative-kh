@@ -117,6 +117,24 @@ static void failed_open_restores_active_file(void) {
     fclose(f); unlink(active); unlink(prev); rmdir(root);
 }
 
+static void four_gib_boundary_without_allocating_four_gib(void) {
+    char root[512], active[640], prev[640];
+    snprintf(root, sizeof root, "%s/kh-logtest-4gib.XXXXXX", getenv("TMPDIR") ?: ".");
+    assert(mkdtemp(root));
+    snprintf(active, sizeof active, "%s/log.txt", root);
+    snprintf(prev, sizeof prev, "%s/log.prev.txt", root);
+    FILE *f = fopen(active, "w+"); assert(f);
+    const uint64_t limit = UINT64_C(4) << 30;
+    // ftruncate creates a sparse file: no 4 GiB allocation or test log writes.
+    assert(!ftruncate(fileno(f), (off_t)(limit - 1)));
+    assert(dm_log_rotate_file(f, active, prev, limit) == 0);
+    assert(!ftruncate(fileno(f), (off_t)limit));
+    assert(dm_log_rotate_file(f, active, prev, limit) == 1);
+    struct stat st; assert(!stat(prev, &st) && (uint64_t)st.st_size == limit);
+    assert(!stat(active, &st) && st.st_size == 0);
+    fclose(f); unlink(active); unlink(prev); rmdir(root);
+}
+
 int main(void) {
     char root[512];
     snprintf(root, sizeof root, "%s/kh-logtest.XXXXXX", getenv("TMPDIR") ?: ".");
@@ -139,7 +157,8 @@ int main(void) {
     concurrent_rotation_preserves_whole_lines();
     many_rotations_leak_no_fds();
     failed_open_restores_active_file();
+    four_gib_boundary_without_allocating_four_gib();
     puts("log rotation: rollover, concurrent-writer (via the real LOG primitive), "
-         "fd-leak and injected-failure checks all pass");
+         "4 GiB sparse boundary, fd-leak and injected-failure checks all pass");
     return 0;
 }

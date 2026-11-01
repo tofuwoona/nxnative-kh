@@ -2,8 +2,8 @@
 """Run an isolated KH2 Mac host with bounded continuous save + NVN/Metal logs.
 
 All existing DM_ROOT/ROMFS/SAVE/MSL paths must already be set by the caller.
-This wrapper never selects or changes a save path. It keeps only two 1 GiB log
-segments, overwriting the older segment on each rollover. The trace contains
+This wrapper never selects or changes a save path. It keeps only two 4 GiB log
+segments (8 GiB maximum), overwriting the older segment on each rollover. The trace contains
 Vulkan-to-Metal render passes, not an Instruments GPU System Trace or screenshots.
 
 Safety: DM_GAME/DM_SAVE presence is validated, but an env var can be stale from
@@ -20,7 +20,7 @@ import signal
 import subprocess
 import sys
 
-LIMIT = 1 << 30
+LIMIT = 4 << 30
 
 
 def run(argv: list[str], log_dir: Path, limit: int, confirm_save_path: str) -> int:
@@ -80,7 +80,7 @@ def run(argv: list[str], log_dir: Path, limit: int, confirm_save_path: str) -> i
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--log-dir", required=True, type=Path)
-    p.add_argument("--rotate-bytes", type=int, default=LIMIT, help="test override; normal limit is 1 GiB")
+    p.add_argument("--rotate-bytes", type=int, default=LIMIT, help="test override; normal limit is 4 GiB per segment")
     p.add_argument("--confirm-save-path", required=True,
                     help="must exactly equal the DM_SAVE path already set in the environment")
     p.add_argument("command", nargs=argparse.REMAINDER)
