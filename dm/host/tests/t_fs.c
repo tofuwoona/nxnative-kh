@@ -136,6 +136,27 @@ int main(void) {
     CHECK(h_fs_MountSave("save", NULL) == RES_OK && write_save("save:/a", "ok3") == RES_OK && h_fs_Commit("save") == RES_OK, "remount without injection: transactional as usual, writing a=ok3 and committing succeed");
     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "committed a = ok3");
 
+    printf("⑦ ignored delete failure must not publish stale save as a successful overwrite\n");
+    setenv("DM_TEST_FS_FAILAT", "delete:1", 1); nf0 = g_nfail;
+    CHECK(h_fs_DeleteFile("save:/a") != RES_OK, "simulated delete of old slot fails");
+    CHECK(h_fs_Commit("save") == RES_FAIL, "commit refuses an overwrite whose delete failed");
+    CHECK(g_nfail == nf0 + 1, "front end is notified of the failed save");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "committed old slot remains intact");
+    unsetenv("DM_TEST_FS_FAILAT");
+
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    printf("⑧ KH2 save paths with Windows separators and slash separators refer to the same slot\n");
+    g_nmnt = 0;
+    snprintf(p, sizeof p, "%s/\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", save); put(p, "old-slot");
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK, "remount an exported legacy KH2 save");
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", got, sizeof got) && !strcmp(got, "old-slot"), "legacy backslash spelling reads the old slot");
+    CHECK(read_fs("save:/KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png", got, sizeof got) && !strcmp(got, "old-slot"), "slash spelling reads the same old slot");
+    CHECK(write_save("save:/KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png", "new-slot") == RES_OK, "overwrite the canonical slot");
+    CHECK(h_fs_Commit("save") == RES_OK, "commit the overwritten slot");
+    g_nmnt = 0; CHECK(h_fs_MountSave("save", NULL) == RES_OK, "restart with the committed save");
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", got, sizeof got) && !strcmp(got, "new-slot"), "after restart the backslash load sees the new slot, not the stale legacy file");
+    snprintf(p, sizeof p, "%s/\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", save); CHECK(same(p, "old-slot"), "original legacy file remains untouched for backup safety");
+#endif
 
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d checks, %d failed ==\n", checks, fails);
