@@ -64,10 +64,9 @@ static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at by
 // Function parameters in this file are never retained again in the callee (the caller / global tables already hold them, and lifetime is guaranteed by defer_obj_release): saves a retain / release pair per call on the hot path
 #pragma clang attribute push(__attribute__((objc_externally_retained)), apply_to = function)
 
-// Single fprintf call per line, same as dm.h's LOG() -- see that macro's
-// comment: a rotation's flockfile() can only land between two calls, never
-// mid-call, so this can't be split across a rotation either.
-#define MLOG(fmt, ...) fprintf(stderr, "[dm] [nvn-mtl] " fmt "\n", ##__VA_ARGS__)
+// Single fprintf call per line via the shared DM_LOG_LINE primitive
+// (dm/host/log_line.h) -- same macro dm.h's LOG() uses, for parity.
+#define MLOG(fmt, ...) DM_LOG_LINE(stderr, "[dm] [nvn-mtl] ", fmt, ##__VA_ARGS__)
 #define MDIE(...) do { MLOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 static void warm_start(void);

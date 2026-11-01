@@ -20,8 +20,11 @@ static char *g_argv[4]; static int g_argc;
 typedef struct { char *active, *previous; } diag_log_paths;
 static void *diag_log_rotate_thread(void *arg) {
     diag_log_paths *paths = arg;
+    // 20ms poll: worst-case overshoot past the 1 GiB limit is bounded by
+    // however much the game's combined log output can produce in 20ms
+    // (thousands of lines/sec at most in practice), not an unbounded burst.
     for (;;) {
-        usleep(250000);
+        usleep(20000);
         flockfile(stderr);
         int result = dm_log_rotate_file(stderr, paths->active, paths->previous, UINT64_C(1) << 30);
         if (result > 0) fprintf(stderr, "[kh2-diag] log rotated at 1 GiB; previous segment overwritten\n");

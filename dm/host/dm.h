@@ -5,14 +5,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "log_line.h"
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 #define MAX_MOD 128   // the profile's modules (up to 8) and the NROs a game loads at run time (Super Smash Bros. Ultimate: 98)
-// One fprintf call per line: with stderr set _IOLBF, a rotation's flockfile()
-// can only ever land between calls, never mid-line, so a rotation can never
-// split a log line across the old and new segment. fmt must be a string
-// literal (adjacent-literal concatenation requires it).
-#define LOG(fmt, ...) fprintf(stderr, "[dm] " fmt "\n", ##__VA_ARGS__)
+// One fprintf call per line via the shared DM_LOG_LINE primitive (log_line.h):
+// with stderr set _IOLBF, a rotation's flockfile() can only ever land between
+// calls, never mid-line, so a rotation can never split a log line across the
+// old and new segment. fmt must be a string literal (adjacent-literal
+// concatenation requires it). dm/ios/tests/t_log_rotation.c tests this exact
+// primitive under a concurrent writer + rotator.
+#define LOG(fmt, ...) DM_LOG_LINE(stderr, "[dm] ", fmt, ##__VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
