@@ -48,6 +48,7 @@ if [ "$PREPARE_XCODE" = YES ]; then
 else DM_SCHEME_NAME=DmIOS; fi
 export DM_SCHEME_NAME
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
+python3 "$IOS_SOURCE/tools/check_kh2_direct_patch.py" "$GD/game.tsv" "$PKG" "$PATCHED" || die "wrong KH2 patched program; use the Program 3 modules"
 [ -e "$ROMFS/$MARKER" ] || die "no RomFS at $ROMFS (missing $MARKER)"
 V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")   # the chain version the host is compiled with, one for every game
 # A Vulkan game (Hades): the shaders are the game's SPIR-V, translated by dm/gfx/tools/vk_shaders.py into $MSL_IOS/vk; an OpenGL game (Digimon Story Cyber Sleuth): its GLSL, translated by
