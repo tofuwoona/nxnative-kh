@@ -13,12 +13,17 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[3]
 BASELINE = '--baseline' in sys.argv[1:]
+SANITIZE = '--sanitize' in sys.argv[1:]
 OUT = Path(os.environ.get('DM_SAVE_TEST_OUT', ROOT / 'docs/agents/kh2-save-fix-evidence' / ('red-extended' if BASELINE else 'green'))).resolve()
 OUT.mkdir(parents=True, exist_ok=True)
-TMP = Path('/Users/tofu/.hermes/cache/scratch/kh-save-fix-fixtures')
+TMP = OUT / 'fixtures'
 TMP.mkdir(parents=True, exist_ok=True)
 ENV = dict(os.environ, TMPDIR=str(TMP), DM_SAVE_TRACE='1')
 ENV.pop('DM_KH2_SAVE_FIX_MIGRATE', None)
+for key in ['DM_TEST_FS_FAIL', 'DM_TEST_FS_FAILAT', 'DM_TEST_KILL_AT', 'DM_FSLOG']:
+    ENV.pop(key, None)
+if SANITIZE:
+    ENV.update(ASAN_OPTIONS='detect_leaks=0', UBSAN_OPTIONS='halt_on_error=1')
 ENV.update(DM_GAMES_DIR=str(ROOT / 'dm/games/010090C022978000/direct-profiles'), DM_GAMES_FIRST='1')
 results = []
 CASES = ['create-failure', 'readonly-path', 'held-handle', 'clone-failure', 'swap-failure', 'concurrent-commit', 'short-io', 'resize-failure', 'crash-before-commit', 'crash-before-swap', 'crash-after-swap', 'normal-aliases', 'recursive-failure', 'log-rotation-save', 'legacy-only', 'overloads', 'create-open-failure', 'create-name-failure', 'write-open-failure', 'stale-edges', 'benign-exists', 'healthy-handle', 'directory-failure', 'directory-name-failure', 'recursive-delete-failure', 'poison-isolation']
@@ -42,15 +47,20 @@ def run(label, cmd, cwd=ROOT):
 
 for game, tag in [('010090C022978003', 'kh2'), ('010090C022978001', 'kh1')]:
     tests = ROOT / 'dm/host/tests'
-    b = tests / ('build-save-' + tag)
+    b = OUT / ('build-save-' + tag)
     b.mkdir(exist_ok=True)
     run(tag + '-profile', ['make', '-C', 'dm/host', 'game_profile', 'GAME=' + game])
     flags = ['clang', '-O1', '-g', '-Wno-unused-function', '-I..', '-I../gen/' + game, '-I../../games/' + game]
+    if SANITIZE: flags += ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
     for name in ([] if BASELINE else ['t_fs', 't_fs_case', 't_fs_commit_list']):
         sources = [name + '.c', '../hle_bigstack.c']
         if name != 't_fs_case': sources.append('t_fs_stub.c')
         if name != 't_fs': sources.append('t_save_review_input_stub.c')
-        rc = run(tag + '-build-' + name, flags + ['-o', str(b / name)] + sources, tests)
+        # ASan pads separate globals, breaking this test's intentional contiguous
+        # Mach-O swforce-section ABI walk. Keep address/UB instrumentation of
+        # code/stack/heap; only this binary disables global redzone insertion.
+        name_flags = flags + (['-mllvm', '-asan-globals=0'] if SANITIZE and name == 't_fs_commit_list' else [])
+        rc = run(tag + '-build-' + name, name_flags + ['-o', str(b / name)] + sources, tests)
         if not rc:
             run(tag + '-' + name, [str(b / name)])
     if not BASELINE:
@@ -60,7 +70,7 @@ for game, tag in [('010090C022978003', 'kh2'), ('010090C022978001', 'kh1')]:
         for case in CASES:
             run(tag + '-adversarial-' + case, [str(adversarial), case])
 
-logexe = ROOT / 'dm/host/tests/build-save-kh2/t_log_rotation'
+logexe = OUT / 'build-save-kh2/t_log_rotation'
 if not BASELINE and not run('build-log-rotation', ['clang', '-O1', '-g', '-pthread', '-o', str(logexe), 'dm/ios/tests/t_log_rotation.c']):
     run('log-rotation', [str(logexe)])
 # No original-save access: deterministic multi-megabyte synthetic byte transport,
@@ -77,7 +87,7 @@ with tempfile.TemporaryDirectory(prefix='synthetic-copy-', dir=TMP) as td:
     expected = Path(td) / 'expected.bin'
     expected.write_bytes(canonical.read_bytes())
     before = manifest(dest)
-    exe = ROOT / 'dm/host/tests/build-save-kh2' / ('t_fs_save_adversarial_baseline' if BASELINE else 't_fs_save_adversarial')
+    exe = OUT / 'build-save-kh2' / ('t_fs_save_adversarial_baseline' if BASELINE else 't_fs_save_adversarial')
     run('synthetic-copy-roundtrip', [str(exe), 'real-roundtrip', str(dest), str(expected)])
     run('synthetic-copy-fresh-process-read', [str(exe), 'real-read', str(dest), str(expected)])
     after = manifest(dest)
