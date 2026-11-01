@@ -289,15 +289,12 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)pushGame {
     CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
     if (w <= 0 || h <= 0) return;
-    double ox, oy, fx, fy; dm_aspect_visible(w, h, &ox, &oy, &fx, &fy);   // DM_ASPECT_FILL=1: the visible (cropped) slice of the 16:9 touch space; otherwise the full frame
-    CGFloat fw = w, fh = h;
-    if (!dm_aspect_fill_on()) { if (fw / fh > 16.0 / 9.0) fw = fh * 16.0 / 9.0; else fh = fw * 9.0 / 16.0; }
-    CGFloat x0 = dm_aspect_fill_on() ? 0 : (b.size.width - fw) / 2, y0 = dm_aspect_fill_on() ? 0 : (b.size.height - fh) / 2;
+    UIEdgeInsets a = self.safeAreaInsets;
+    dm_aspect_rect f = dm_aspect_frame(w, h, a.left, a.top, a.right, a.bottom);
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = [_game[i] locationInView:self];
-        double nx = ox + fmin(fmax((p.x - x0) / fw, 0), 1) * fx;
-        double ny = oy + fmin(fmax((p.y - y0) / fh, 0), 1) * fy;
+        double nx, ny; dm_aspect_touch(f, p.x, p.y, &nx, &ny);
         t[n++] = (dm_touch){(uint32_t)i, (float)fmin(nx, 0.999), (float)fmin(ny, 0.999)};
     }
     dm_touch_set(t, n);

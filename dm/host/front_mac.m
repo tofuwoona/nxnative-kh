@@ -254,11 +254,8 @@ static void pads_start(void) {
     NSPoint p = [self convertPoint:e.locationInWindow fromView:nil]; NSSize b = self.bounds.size;
     double w = b.width, h = b.height;
     if (w <= 0 || h <= 0) return;
-    double ox, oy, fx, fy; dm_aspect_visible(w, h, &ox, &oy, &fx, &fy);   // DM_ASPECT_FILL=1: the visible (cropped) slice of the 16:9 touch space; otherwise the full frame
-    if (!dm_aspect_fill_on()) { if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0; }   // the centered 16:9 picture the present fits into the view, as on the iPhone (DmGamepad.m)
-    double x0 = dm_aspect_fill_on() ? 0 : (b.width - w) / 2, y0 = dm_aspect_fill_on() ? 0 : (b.height - h) / 2;
-    double nx = ox + fmin(fmax((p.x - x0) / w, 0), 1) * fx;
-    double ny = oy + fmin(fmax(1 - (p.y - y0) / h, 0), 1) * fy;   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
+    dm_aspect_rect f = dm_aspect_frame(w, h, 0, 0, 0, 0);
+    double nx, ny; dm_aspect_touch(f, p.x, h - p.y, &nx, &ny);   // AppKit bottom-left -> shared top-left touch space
     dm_touch t = {0, (float)fmin(nx, 0.999), (float)fmin(ny, 0.999)};
     dm_touch_set(&t, 1); g_mouse_down = 1;
 }
