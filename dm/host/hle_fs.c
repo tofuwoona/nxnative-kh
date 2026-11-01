@@ -46,6 +46,9 @@ static uint8_t g_fmode[65536];              // fd → open mode
 static uint8_t g_fsave[65536];              // fd → whether it is on a transactional save mount (the save write injection point only counts these)
 static _Atomic int g_save_writes;           // number of writes on the save mount (shared by the injection point and the commit log)
 static _Atomic uint64_t g_txn_first_ns;     // time of this transaction's first save write (used by the commit log to report timing; cleared to 0 at commit)
+static _Atomic uint64_t g_txn_input_ns;     // preceding input transition at the FIRST write, not a later stick movement during the save
+// t_fs has no HID implementation; the weak reference is zero there, and the real host links hle_hid.c.
+extern uint64_t dm_input_last_event_ns(void) __attribute__((weak));
 // Write failures are refused per transaction: on the real device save space is reserved when the save is created, overwrites cannot fail, and the game does not check the return values of WriteFile / SetFileSize either, it Commits as usual after a failure
 // (after injecting a failure on the 1st write, the committed save file was 0 bytes). When a host write fails (disk full etc., really possible on iOS):
 // if any save write / set-size failed between the last Commit and this Commit, this Commit is refused -- the committed version is unchanged, the working directory is discarded and re-cloned from the committed version,
@@ -556,6 +559,7 @@ uint64_t dm_fs_commit_count(void) { return atomic_load(&g_save_commits); }
 // and mount locks; front-end failure notification is delivered after unlocking.
 static Result commit_mount_locked(int i, int *notify_error) {
     uint64_t tc1 = clock_gettime_nsec_np(CLOCK_MONOTONIC), tw0 = atomic_exchange(&g_txn_first_ns, 0);
+    uint64_t ti = atomic_exchange(&g_txn_input_ns, 0);
     int perr = atomic_exchange(&g_save_poison, 0);
     if (perr) {                                                         // a write failed in this transaction: refuse the commit, discard the working directory
         char torn[512] = ""; size_t tl = 0; DIR *d0 = opendir(g_mnt[i].dir); struct dirent *e0;   // record files truncated to 0 bytes (the damage that would enter the save if committed as usual)
@@ -593,7 +597,13 @@ static Result commit_mount_locked(int i, int *notify_error) {
         LOG("save commit #%d: %s swapped atomically into %s (%d save writes so far) (clone + swap %llu us, since this transaction's first write %llu us)", ++n, g_mnt[i].dir, g_mnt[i].commit, atomic_load(&g_save_writes),
             (unsigned long long)((tc2 - tc1) / 1000), (unsigned long long)(tw0 ? (tc2 - tw0) / 1000 : 0)); atomic_fetch_add(&g_save_commits, 1);
     }
-    if (save_trace_on()) LOG("[save-trace] commit %s %s writes=%d", g_mnt[i].commit, r == RES_OK ? "ok" : "failed", atomic_load(&g_save_writes));
+    if (save_trace_on()) {
+        LOG("[save-trace] commit %s %s writes=%d", g_mnt[i].commit, r == RES_OK ? "ok" : "failed", atomic_load(&g_save_writes));
+        if (tw0 && ti && ti <= tw0) LOG("[save-timing] input_to_first_write_us=%llu input_to_commit_us=%llu first_write_to_commit_us=%llu input_ns=%llu first_write_ns=%llu",
+            (unsigned long long)((tw0 - ti) / 1000), (unsigned long long)((clock_gettime_nsec_np(CLOCK_MONOTONIC) - ti) / 1000),
+            (unsigned long long)((clock_gettime_nsec_np(CLOCK_MONOTONIC) - tw0) / 1000), (unsigned long long)ti, (unsigned long long)tw0);
+        else if (tw0) LOG("[save-timing] input_to_commit_us=unknown first_write_ns=%llu (no preceding captured input transition)", (unsigned long long)tw0);
+    }
     return r;
 }
 HLE_FORCE("_ZN2nn2fs6CommitEPKc", "fsp-srv; transactional save: the whole work directory tree is cloned, then swapped atomically with the committed directory (renamex_np RENAME_SWAP)", Result, h_fs_Commit, const char *name) {
@@ -703,7 +713,10 @@ HLE_FORCE("_ZN2nn2fs9WriteFileENS0_10FileHandleElPKvmRKNS0_11WriteOptionE", "fsp
             if (f && !strncmp(f, "write:", 6)) { fail_n = atoi(f + 6); const char *c = strchr(f + 6, ':'); fail_e = c ? atoi(c + 1) : ENOSPC; }
             cfg = 1; }
         int n = atomic_fetch_add(&g_save_writes, 1) + 1;
-        { uint64_t z = 0; atomic_compare_exchange_strong(&g_txn_first_ns, &z, clock_gettime_nsec_np(CLOCK_MONOTONIC)); }
+        { uint64_t last_input = dm_input_last_event_ns ? dm_input_last_event_ns() : 0;
+          uint64_t z = 0, t = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+          if (atomic_compare_exchange_strong(&g_txn_first_ns, &z, t))
+              atomic_store(&g_txn_input_ns, last_input); }
         if (kill_n && n == kill_n) { LOG("DM_TEST_KILL_AT: save write #%d, calling _exit (simulates being killed mid-write)", n); _exit(9); }
         if (fail_n && n == fail_n) { LOG("DM_TEST_FS_FAIL: save write #%d returns failure errno=%d", n, fail_e); errno = fail_e; save_poison(fail_e); save_trace_file(h, "write", off, sz, fail_e); return err_res("pwrite (injected)", "fd"); }
     }

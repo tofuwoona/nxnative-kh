@@ -16,6 +16,9 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 #undef pwrite
 ssize_t pwrite(int, const void *, size_t, off_t);
 
+static uint64_t fake_last_input_ns;
+uint64_t dm_input_last_event_ns(void) { return fake_last_input_ns; }
+
 struct dm_flags g_flag; uint64_t g_t0_ns; uint64_t now_ns(void) { return 0; }   // stubs for log timestamps and the read path (not used by the write path)
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
 extern int g_nfail, g_lasterr;                                        // front-end notification count (the strong implementation in t_fs_stub.c replaces the weak one in hle_fs.c)
@@ -171,6 +174,24 @@ int main(void) {
     CHECK(h_fs_Commit("save") == RES_OK && same(p, "new"), "KH1 canonical file committed");
     g_nmnt = 0; CHECK(h_fs_MountSave("save", NULL) == RES_OK, "KH1 remount");
     CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png", got, sizeof got) && !strcmp(got, "new"), "KH1 read after restart");
+#endif
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    printf("⑨ Save input-to-commit timing uses last transition before the first write\n");
+    g_nmnt = 0;
+    unsetenv("DM_SAVE");
+    snprintf(save, sizeof save, "%s/input-time-save", root);
+    mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "before");
+    setenv("DM_SAVE", save, 1);
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK, "mount timing fixture");
+    fake_last_input_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC) - 1000000000ull;
+    CHECK(write_save("save:/a", "after") == RES_OK, "first save write succeeds");
+    CHECK(atomic_load(&g_txn_input_ns) == fake_last_input_ns, "first write captures the preceding input timestamp");
+    fake_last_input_ns += 500000000ull;
+    CHECK(write_save("save:/a", "final") == RES_OK, "second write succeeds");
+    CHECK(atomic_load(&g_txn_input_ns) == fake_last_input_ns - 500000000ull, "later input does not change the transaction's initial input anchor");
+    CHECK(h_fs_Commit("save") == RES_OK, "timed commit succeeds");
+    CHECK(atomic_load(&g_txn_input_ns) == 0, "commit clears the input timing anchor for the next save");
+    fake_last_input_ns = 0;
 #endif
 
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);

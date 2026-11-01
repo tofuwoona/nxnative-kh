@@ -41,7 +41,7 @@ def run(argv: list[str], log_dir: Path, limit: int, confirm_save_path: str) -> i
     active, previous = log_dir / "kh2-diag.log", log_dir / "kh2-diag.prev.log"
     if active.exists():
         active.replace(previous)
-    env = dict(os.environ, DM_FS="1", DM_SAVE_TRACE="1", DM_KH24_DIAG="1")
+    env = dict(os.environ, DM_FS="1", DM_SAVE_TRACE="1", DM_KH24_DIAG="1", DM_KH_INPUT_TRACE="1")
     child = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
     assert child.stdout
     old_handlers = {}

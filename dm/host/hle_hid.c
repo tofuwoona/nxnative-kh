@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <math.h>
+#include <TargetConditionals.h>
 
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
@@ -29,6 +30,36 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 // (dm_pad_set_player). Press edges are latched until the game's next read so short presses are not lost
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
+static _Atomic uint64_t g_input_last_ns;
+uint64_t dm_input_last_event_ns(void) { return atomic_load_explicit(&g_input_last_ns, memory_order_relaxed); }
+// Trace front-end publications rather than every guest HID poll. Only changed
+// states are recorded; buttons include shake, axes are signed raw Npad units.
+// Monotonic timestamps share CLOCK_MONOTONIC with the save transaction timer.
+// The existing two-segment iOS stderr rotation bounds this trace with all
+// other diagnostics. Off by default and compiled out for non-KH2 profiles.
+static void kh_input_trace(int source, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    static _Atomic int enabled = -1;
+    int on = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (on < 0) { const char *e = getenv("DM_KH_INPUT_TRACE"); on = e && *e && strcmp(e, "0"); atomic_store_explicit(&enabled, on, memory_order_relaxed); }
+    if (!on) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct { uint64_t buttons; int32_t a[4]; int seen; } prev[DM_PLAYERS + 1];
+    int slot = source + 1; if (slot < 0 || slot > DM_PLAYERS) return;
+    pthread_mutex_lock(&mu);
+    if (!prev[slot].seen && !buttons && !lx && !ly && !rx && !ry) { prev[slot].seen = 1; pthread_mutex_unlock(&mu); return; }
+    if (prev[slot].seen && prev[slot].buttons == buttons && prev[slot].a[0] == lx && prev[slot].a[1] == ly && prev[slot].a[2] == rx && prev[slot].a[3] == ry) { pthread_mutex_unlock(&mu); return; }
+    prev[slot].seen = 1; prev[slot].buttons = buttons;
+    prev[slot].a[0] = lx; prev[slot].a[1] = ly; prev[slot].a[2] = rx; prev[slot].a[3] = ry;
+    uint64_t t = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    atomic_store_explicit(&g_input_last_ns, t, memory_order_relaxed);
+    LOG("[input-trace] t_ns=%llu source=%d buttons=%#llx axes=%d,%d,%d,%d", (unsigned long long)t, source,
+        (unsigned long long)buttons, lx, ly, rx, ry); // source -1=front (merged touch+physical iOS), 0..7=pad player
+    pthread_mutex_unlock(&mu);
+#else
+    (void)source; (void)buttons; (void)lx; (void)ly; (void)rx; (void)ry;
+#endif
+}
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
 }
@@ -48,11 +79,13 @@ static void shake_note(void) {
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
+    kh_input_trace(-1, buttons, lx, ly, rx, ry);
 }
 void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     if (p < 0 || p >= DM_PLAYERS) return;
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();
+    kh_input_trace(p, buttons, lx, ly, rx, ry);
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
@@ -139,6 +172,16 @@ static void *ctl_main(void *arg) {
                 size_t n = strlen(line); if (!n || line[n - 1] != '\n') break;   // a line still being written: read it next time
                 off += (long)n; line[--n] = 0; if (n && line[n - 1] == '\r') line[--n] = 0;
                 if (!n || line[0] == '#') continue;
+                if (!strncmp(line, "replay ", 7)) {
+#if TARGET_OS_IPHONE
+                    LOG("[RED] DM_CTL replay is Mac-only");
+#else
+                    extern int dm_input_replay_mac_start(const char *path);
+                    int r = dm_input_replay_mac_start(line + 7);
+                    if (r <= 0) LOG("[RED] DM_CTL replay refused (Mac KH2 only; set DM_KH_REPLAY_ALLOW=1, absolute isolated DM_SAVE and matching DM_KH_REPLAY_CONFIRM_SAVE; one replay at a time)");
+#endif
+                    continue;
+                }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
