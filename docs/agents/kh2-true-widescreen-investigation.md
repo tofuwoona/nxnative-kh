@@ -28,6 +28,94 @@ In frame 3000, `VPTRACE` changed-state records show mixed full-target 1920x1080 
 
 `DM_VK_UBOTRACE_MIN_SUBMIT=3000` was mistargeted: gameplay frame 3000 actually spans submissions 4316–4319; the printed UBOs near submit 3000 belong to earlier frames. They must not be correlated with this screenshot. The checked-in `dm/gfx/vk/tests/kh2_trace_summary.py` is an offline fixture that preserves attachment/source texture records and explicitly reports the cap and true submission range; its synthetic and real-capture tests pass. The next **short, externally coordinated** capture can target UBO submit 4316 and narrow VPTRACE to the relevant draw family (or raise the cap in a tightly bounded diagnostic build), with paired pre/post-UI attachment images. Do not run a second long host session while the separate Mac GPU profiling work is underway.
 
+## Correctly-targeted capture and a real camera-rotation disproof
+
+Two isolated-save re-runs (never the phone/original backup; the iPhone17 backup was only read,
+copied fresh into scratch-only `run400`/`run401`/`run402` save dirs) resolved the stale-target bug
+and produced a conclusive, not merely a mistargeted, result.
+
+**UBOTRACE targeting was the actual bug, VPTRACE was not.** Rereading `run220/run.log` shows
+`DM_VK_VPTRACE_FRAME=3000` (frame-counter mode) had already correctly logged the real gameplay
+submits for that screenshot (`frame=3000 submit=4316…4325`, 256 total records capped only after
+frames 3000 **and** 3001 were each fully enumerated — 122 complete changed-state records apiece;
+only frame 3002 was truncated). The actual mismatch was `DM_VK_UBOTRACE_MIN_SUBMIT=3000`, a
+*submit*-indexed window that landed on early loading-screen submits near literal value 3000, far
+from the real submits 4316+. `run400` reproduced frame 3000 with `DM_VK_UBOTRACE_MIN_SUBMIT=4300`
+(discovered from run220's own VPTRACE output) and got real, submit-matched UBO lines — but frame
+3000 turned out to be a **camera-locked** moment: the loaded save spawns Sora standing in the save
+crystal's interaction beam with the `X Save / Attack / Magic / Items / Drive` panel already up, and
+the scene is pixel-identical from frame 2990 through frame 4500 regardless of stick input (confirmed
+by screenshots and by `VPdiag`/`WorldViewdiag` never changing). That is not evidence those fields are
+camera-driven; it is evidence the camera itself was locked, so it is an invalid test.
+
+`run401` (discovery) and `run402` (full capture, identical deterministic save+keys) fixed that: a
+left-stick hold (`f2520:LDown~2.5`) plus a right-stick turn (`f2900:RRight~0.6`) produced a
+**confirmed real ~90° camera rotation** at frames 2910/2911 — screenshots `run401/frame-2890.png`
+(facing the bookshelf/desk wall) through `run401/frame-3200.png` and `run402/frame-2911.png` (facing
+a completely different wall, with a computer console/workbench) show the background change entirely
+while Sora stays by the save point. `run401`'s own VPTRACE log (frame-keyed, no guessing needed)
+gave the real submit numbers for that moment; `run402` re-ran the identical save/keys with
+`DM_VK_UBOTRACE_MIN_SUBMIT` set from that real number (not a frame-number guess) and a wide-enough
+margin that it kept matching even though submit numbering drifted by about a dozen when UBOTRACE's
+own logging overhead was added (confirmed empirically: frame 2910 was submits 3954-3957 in run401,
+3966-3969 in run402 — **submit windows must include margin, an exact single guessed value is not
+reliable even run-to-run with identical `DM_KEYS`, because `f`-prefixed key timings pin the *frame*
+counter, not the *submit* counter**). Both runs captured **complete, uncapped-for-that-frame**
+changed-state inventories: frame 2910 and 2911 each logged 128 records with zero truncation (256
+total split exactly across the two target frames), confirmed against `kh2_trace_summary.py`'s own
+`submit_range` computation (`tests/test_kh2_trace_summary.py::test_correctly_targeted_capture_matches_real_submits`).
+The 256-record cap was not raised; narrowing the window to the two frames that actually matter was
+sufficient this time. (If a future target frame alone exceeds ~256 distinct changed-state draws, the
+per-process `vp_logged` cap in `hle_vk.m` would need raising for a diagnostic build, or the capture
+would need splitting into single-frame windows via separate runs — not done here because it wasn't
+needed.)
+
+**Result: the prior "VPdiag"/"WorldViewdiag" hypothesis is disproved, not confirmed.** Across the
+whole genuine-rotation window (submits 3954-3985), for the three world-geometry vertex shaders
+(`4c1e2f47738ed1ba`, `d7a52a49f521f4f0`, `8cca46c2723c962d` — the only shaders with all three of
+bindings `0.2`/`0.3`/`0.4` per `vk_shaders.tsv`), binding `0.2`'s decoded `VPdiag` (bytes 80-143 of
+its 144-byte UBO, the diagonal of a hypothetical 4x4 float matrix) and binding `0.4`'s
+`WorldViewdiag` (bytes 0-63, same diagonal convention) are **both frozen at `1,1,1,1` on every single
+logged submit**, before, during and after the confirmed camera turn. Binding `0.3`'s
+`LocalProjection0diag` does vary, but in a pattern tied to *which specific mesh is being drawn*
+(exact value triples like `246.001,266.502,0.554801` and `-1242.56,1664.89,0.775122` recur
+byte-identically across different frames/camera angles, consistent with a fixed per-object/local
+transform, not a per-frame camera one; its slowly-incrementing 4th component, e.g. `2013→2020→2026`,
+looks like an animation/time value on the save-crystal effect object, unrelated to camera facing).
+The `4224d4542e2f8e20` fullscreen-quad shader (the only resource it declares is `u:0.2`, a 64-byte
+UBO with only `FillScale` in range) stayed `FillScale=1` on every sample through the same rotation —
+this part of the prior hypothesis holds up under real evidence: that shader is structurally and
+empirically camera-independent, a genuine 2D/HUD-postprocess pass. The `5715f513ed87a8a9` "movieVS"
+shader's own `VPdiag`-labeled bytes are not camera-related either — they repeat byte-identically
+across different camera angles for the same recurring UI/text draw (e.g. `231727,186248,1,0`) and
+differ only between distinct UI elements, matching a text/sprite-atlas position field, not a matrix.
+
+**So the discriminator that *is* evidence-backed today is structural, not byte-offset-based**: the
+three world-geometry vertex shaders bind three separate UBOs (`0.2`+`0.3`+`0.4`); the fullscreen and
+UI/movie passes bind only one (`0.2`). That alone cleanly separates the shader families in the
+shader table and matches the observed camera-(in)dependence. It is **not** sufficient to safely
+recompute a horizontal FOV, because the actual camera view/projection matrix has not been located.
+
+**Next blocker (precise):** the real per-frame camera view/projection matrix is not among the
+currently-decoded bytes of `d7a52a49f521f4f0`'s three UBOs at the previously-assumed diagonal
+offsets, and this shader declares no other resources (no push constant, no additional binding) per
+`vk_shaders.tsv`, so if a camera uniform exists at all for this shader it must be in an
+**undecoded byte range** of the same three buffers (144/448/64 bytes; `vk_trace_ubo` currently only
+samples specific named fields, not a full hex dump). The next step is a small, diagnostic-only
+`DM_VK_UBODUMP`-style full-buffer hex dump (gated the same way, off by default) for exactly this one
+shader key across a confirmed camera-rotation window like `run402`'s, to find which bytes actually
+move with camera angle — or, if none do, treat that as evidence the perspective transform is applied
+to vertices before upload (CPU-side, common in ported PS2-era renderers) rather than via a per-frame
+camera uniform, which would need a different investigation path (vertex buffer content, not UBOs).
+No such dump was implemented in this pass; it is unverified and intentionally not claimed. **No
+wider-FOV change was made or should be made from this evidence.**
+
+Evidence: `/Users/tofu/.hermes/cache/scratch/kh2-wide-evidence/run400/` (locked-camera control, shows
+the bug in isolation), `run401/` (discovery run + screenshots proving the real ~90° turn), `run402/`
+(full VPTRACE+UBOTRACE capture at the correct submits, `invocation.txt`, `run.log`, screenshots
+`frame-2890.png`..`frame-3200.png`). `dm/gfx/vk/tests/test_kh2_trace_summary.py` gained three tests
+against `run402`'s real log (skipped, not failed, on hosts without the scratch evidence).
+
 ## Next discriminating experiment
 
 For a later short, GPU-coordinated experiment, use an isolated gameplay save and a matched frame. `DM_VK_VPTRACE_FRAME=<gameplay frame>` records changed states only and caps at 256 across three frames; `DM_VK_UBOTRACE_MIN_SUBMIT` needs the **submission number** measured in the first trace, not the frame number. Compare targeted pass/attachment and source-texture captures before and after HUD composition, then inspect actual Program-3 shader reflection and UBO matrix bytes at two camera poses. Correlate camera motion with projection and culling before changing a guest NSO byte or shader. The earlier 35-second run (frames 120/240) was only loading; the new gameplay run above resolves that screenshot blocker but not the true-wide renderer boundary.
