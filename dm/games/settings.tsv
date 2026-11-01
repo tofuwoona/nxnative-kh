@@ -16,7 +16,6 @@ DM_METAL_HUD	toggle	-	0	always	Performance HUD
 DM_TOUCH_HAPTICS	toggle	-	1	always	Touch feedback
 DM_SWAP_FACE_BUTTONS	toggle	-	0	always	Swap face buttons	Swap A/B and X/Y for touch and physical controllers.
 DM_ASPECT_FILL	toggle	-	0	game:010090C022978001,010090C022978003	Fill screen (crop)	Remove black bars by cropping the top/bottom or sides of the 16:9 image. May cut off HUD; off by default.
-DM_PRESERVE_FULL_HUD	toggle	-	0	game:010090C022978003	Preserve full HUD (temporary 16:9 fit)	Overrides Fill screen (crop), even if both are on. Fits the entire unstretched 16:9 picture inside the safe area with black bars. Temporary fallback, not true widescreen; no extra world view. Off by default.
-DM_VK_COALESCE_PASSES	toggle	-	0	game:010090C022978003	Experimental pass coalescing (diagnostic)	Unverified, diagnostic-only renderer experiment for a controlled test. Off by default; no proven FPS benefit.
+DM_VK_COALESCE_PASSES	toggle	-	1	game:010090C022978003	MISS effect render fix	Reduces slowdown from pirate “MISS” effects by coalescing compatible render passes. On by default; disable if you see rendering problems.
 DM_RUMBLE	toggle	-	1	always	Game rumble
 DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Rumble strength

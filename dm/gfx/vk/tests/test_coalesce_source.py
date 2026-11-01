@@ -1,4 +1,4 @@
-"""Source-level safety regression for the opt-in KH2 encoder coalescer.
+"""Source-level safety regression for the KH2 encoder coalescer.
 
 Integration benchmarks (including pixels and GPU time) are separate gates;
 this test prevents the specific blind spot found by Sonnet 5 from returning.

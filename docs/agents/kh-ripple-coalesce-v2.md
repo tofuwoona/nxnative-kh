@@ -1,5 +1,9 @@
 # KH2 ripple encoder-coalescing experiment (isolated branch)
 
+Historical experiment/build evidence below; default-off statements describe
+those revisions. For current KH2 MISS-render defaults and the removed temporary
+HUD mode, see [kh2-miss-defaults.md](kh2-miss-defaults.md).
+
 Branch `fix/kh2-ripple-review-v2` starts from the KH diagnostic checkout, not upstream `nxnative`. Do not merge or enable on the phone based on unit tests alone.
 
 ## Observed problem

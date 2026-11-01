@@ -8,7 +8,6 @@ static void depth_stencil_case(id<MTLDevice> dev, id<MTLCommandQueue> queue);
 
 int main(void) {
     @autoreleasepool {
-        if (!getenv("DM_VK_COALESCE_PASSES")) setenv("DM_VK_COALESCE_PASSES", "1", 1);
         g_dev = MTLCreateSystemDefaultDevice();
         assert(g_dev);
         g_dss_off = [g_dev newDepthStencilStateWithDescriptor:[MTLDepthStencilDescriptor new]];

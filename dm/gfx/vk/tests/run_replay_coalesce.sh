@@ -24,6 +24,8 @@ if [[ "${1:-}" == --red ]]; then
     exit 1
   fi
   printf 'EXPECTED RED: coalescing disabled, actual replay produced two encoders (exit %s)\n' "$result"
+elif [[ "${1:-}" == --default ]]; then
+  env -u DM_VK_COALESCE_PASSES "$work/replay-test"
 else
   DM_VK_COALESCE_PASSES=1 "$work/replay-test"
 fi

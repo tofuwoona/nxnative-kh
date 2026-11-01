@@ -5,6 +5,7 @@ Run on macOS with Metal and the KH2 direct profile:
 ```sh
 bash dm/gfx/vk/tests/run_replay_coalesce.sh --red
 bash dm/gfx/vk/tests/run_replay_coalesce.sh
+bash dm/gfx/vk/tests/run_replay_coalesce.sh --default
 ```
 
 `DM_GAMES_DIR` may override the default direct-profiles directory (the script
@@ -15,6 +16,9 @@ commands with the production `h_vkCmd*` functions and calls production
 Dead-stripping and dynamic lookup leave unrelated host entry points unlinked;
 no host/device/game process is started. The first control deliberately disables
 coalescing and verifies that the merge assertion fails (two encoders).
+The ordinary green run explicitly sets `DM_VK_COALESCE_PASSES=1`; `--default`
+unsets it and exercises KH2's native default-on path without launcher assistance.
+`DM_VK_COALESCE_PASSES=0` still disables it. Other profiles remain disabled.
 
 Green asserts Metal command-buffer completion and the actual encoder/pass
 counters for: two compatible drawn LOAD/STORE passes sharing one encoder;

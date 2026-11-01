@@ -86,10 +86,9 @@ static void launcher_done(void) { [g_root startGame]; }
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
-    UIEdgeInsets a = self.view.safeAreaInsets;
-    dm_aspect_rect f = dm_aspect_frame(b.size.width, b.size.height, a.left, a.top, a.right, a.bottom);
-    // Preserve shares fractional safe-area geometry with touch; other modes retain the original floored image origin.
-    self.game.frame = dm_preserve_full_hud_on() ? CGRectMake(f.x, f.y, f.w, f.h) : CGRectMake(floor(f.x), floor(f.y), f.w, f.h);
+    CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen (DM_ASPECT_FILL=1: let the game view take the whole screen instead; nvn_mtl.m crops the picture to match)
+    if (!dm_aspect_fill_on()) { if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0; }
+    self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
         self.fps.frame = CGRectMake(floor(CGRectGetMinX(s) + 130 * u), floor(CGRectGetMinY(s) + 22 * u - 11), 64, 22);

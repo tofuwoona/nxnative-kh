@@ -140,7 +140,7 @@ static int vk_coalesce_on(void) {
 #if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
     static _Atomic int enabled = -1;
     int v = atomic_load_explicit(&enabled, memory_order_relaxed);
-    if (v < 0) { const char *e = getenv("DM_VK_COALESCE_PASSES"); v = e && !strcmp(e, "1");
+    if (v < 0) { const char *e = getenv("DM_VK_COALESCE_PASSES"); v = !e || !strcmp(e, "1");
         atomic_store_explicit(&enabled, v, memory_order_relaxed); }
     return v;
 #else
