@@ -71,6 +71,7 @@ static int boot_env(void) {
         setenv("DM_SAVE_TRACE", "1", 1); // KH2 uses Vulkan: hle_vk.m records its actual Metal passes under DM_KH24_DIAG
         diag_log_paths *paths = calloc(1, sizeof *paths);
         if (paths) { paths->active = strdup(log.fileSystemRepresentation); paths->previous = strdup(prev.fileSystemRepresentation); }
+        dm_log_rotate_assert_sole_owner(fileno(stderr));
         pthread_t thread;
         if (!paths || !paths->active || !paths->previous || pthread_create(&thread, NULL, diag_log_rotate_thread, paths)) {
             fprintf(stderr, "[RED] KH2 continuous diagnostic log rotation could not start\n");

@@ -126,9 +126,11 @@ static _Atomic uint64_t g_n_draw, g_n_pass, g_n_submit, g_n_copy, g_n_pso, g_mem
 static _Atomic uint64_t g_frames;
 static int vk_diag_on(void) {
 #if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
-    static int enabled = -1;
-    if (enabled < 0) { const char *e = getenv("DM_KH24_DIAG"); enabled = e && *e && strcmp(e, "0"); }
-    return enabled;
+    static _Atomic int enabled = -1;
+    int v = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (v < 0) { const char *e = getenv("DM_KH24_DIAG"); v = e && *e && strcmp(e, "0");
+        atomic_store_explicit(&enabled, v, memory_order_relaxed); }
+    return v;
 #else
     return 0;
 #endif
