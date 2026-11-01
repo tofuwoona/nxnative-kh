@@ -46,6 +46,7 @@ static inline uint64_t tex_slot_h(const uint64_t *tex, const uint64_t *img, unsi
 static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at byte b (defined with the draw state, TEXA / SAMPA)
 #include "nvn_hmap.h"
 #include "../../host/dm.h"
+#include "../../host/aspect_fill.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
 #include <mach-o/dyld.h>
@@ -8629,6 +8630,30 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
     if (!v) { RED_ONCE(69, "present: cannot create a non-sRGB view of the sRGB swapchain texture (format %lu); presenting the decoded values", (unsigned long)src.pixelFormat); return src; }
     return v;
 }
+// Computes the viewport to draw into, and the source sub-rect to sample,
+// when presenting a (cx,cy,cw,ch) source crop into a dw x dh destination.
+// Fit (the default): scales the source down to the largest size that fits
+// inside the destination, preserving its aspect ratio with black bars in
+// the rest. Fill (DM_ASPECT_FILL=1): scales the source up to the smallest
+// size that covers the destination and crops its edges to match instead --
+// no black bars, no stretching, but *ncx/*ncy/*ncw/*nch (the sampled
+// sub-rect) shrink versus the input cx/cy/cw/ch, so content near whichever
+// edge gets cropped (HUD elements, typically) will not be visible. Callers
+// pass *ncx/*ncy/*ncw/*nch already initialized to cx/cy/cw/ch; this only
+// narrows them, never widens past the input crop.
+static MTLViewport present_fit(double cx, double cy, double cw, double ch, double dw, double dh,
+                                double *ncx, double *ncy, double *ncw, double *nch) {
+    if (dm_aspect_fill_on()) {
+        double scale = fmax(dw / cw, dh / ch), vw = dw / scale, vh = dh / scale;
+        *ncx = cx + (cw - vw) / 2; *ncw = vw;
+        *ncy = cy + (ch - vh) / 2; *nch = vh;
+        return (MTLViewport){0, 0, dw, dh, 0, 1};
+    }
+    double s = fmin(dw / cw, dh / ch);
+    MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
+    if (fabs((dw / dh) / (cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+    return vp;
+}
 static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTexture> dst, const int crop[4]) {
     NSUInteger cx = 0, cy = 0, cw = src.width, ch = src.height;
     if (crop && (crop[2] || crop[3])) {
@@ -8645,10 +8670,10 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     present_pipeline(dst.pixelFormat);
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
     // Keep the game picture's aspect ratio and center it, leaving black bars in the rest (no stretching when the screen ratio differs from the game's, e.g. iPhone about 19.5:9 versus the game's 16:9);
-    // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border
-    double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
-    MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-    if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+    // when the ratio difference is < 1% (the remainder from the game width being a multiple of 8 in the full-screen setup, e.g. 1952x900 versus 2868x1320 differs by 0.17%) fill directly, leaving no few-pixel border.
+    // DM_ASPECT_FILL=1 (present_fit): instead crop the picture to the screen's aspect ratio so it fills the screen with no black bars; see aspect_fill.h.
+    double dw = dst.width, dh = dst.height, ncx = cx, ncy = cy, ncw = cw, nch = ch;
+    MTLViewport vp = present_fit(cx, cy, cw, ch, dw, dh, &ncx, &ncy, &ncw, &nch);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     static double last_vp[4];   // Log one line when the viewport changes (used by the real-device screen-level acceptance screen_check.py to check the aspect ratio)
     if (memcmp(last_vp, &vp, sizeof last_vp)) { memcpy(last_vp, &vp, sizeof last_vp);
@@ -8659,8 +8684,8 @@ static int present_encode(id<MTLCommandBuffer> cb, id<MTLTexture> src, id<MTLTex
     id<MTLRenderCommandEncoder> en = [cb renderCommandEncoderWithDescriptor:rp];
     [en setViewport:vp];
     [en setRenderPipelineState:g_blit_pso]; [en setFragmentTexture:present_raw_src(src) atIndex:0]; [en setFragmentSamplerState:g_blit_samp atIndex:0];
-    float uv[8] = {(float)cx / src.width, (float)cy / src.height, (float)cw / src.width, (float)ch / src.height,
-                   (cx + 0.5f) / src.width, (cy + 0.5f) / src.height, (cx + cw - 0.5f) / src.width, (cy + ch - 0.5f) / src.height};
+    float uv[8] = {(float)(ncx / src.width), (float)(ncy / src.height), (float)(ncw / src.width), (float)(nch / src.height),
+                   (float)((ncx + 0.5) / src.width), (float)((ncy + 0.5) / src.height), (float)((ncx + ncw - 0.5) / src.width), (float)((ncy + nch - 0.5) / src.height)};
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [en setFragmentBytes:uv length:sizeof uv atIndex:0];
     [en drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -8677,9 +8702,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
         cx = crop[0]; cy = crop[1]; cw = crop[2]; ch = crop[3];
     }
     present_pipeline(dst.pixelFormat);
-    double dw = dst.width, dh = dst.height, s = fmin(dw / cw, dh / ch);
-    MTLViewport vp = {floor((dw - cw * s) / 2), floor((dh - ch * s) / 2), round(cw * s), round(ch * s), 0, 1};
-    if (fabs((dw / dh) / ((double)cw / ch) - 1) < 0.01) vp = (MTLViewport){0, 0, dw, dh, 0, 1};
+    double dw = dst.width, dh = dst.height, ncx = cx, ncy = cy, ncw = cw, nch = ch;
+    MTLViewport vp = present_fit(cx, cy, cw, ch, dw, dh, &ncx, &ncy, &ncw, &nch);
     int full = vp.originX == 0 && vp.originY == 0 && vp.width == dw && vp.height == dh;
     MTL4RenderPassDescriptor *rp = [MTL4RenderPassDescriptor new];
     rp.colorAttachments[0].texture = dst;
@@ -8693,8 +8717,8 @@ static int present_encode_m4(id<MTL4CommandBuffer> cb, id<MTLTexture> src, id<MT
     [g_present_args setTexture:present_raw_src(src).gpuResourceID atIndex:0];
     [g_present_args setSamplerState:g_blit_samp.gpuResourceID atIndex:0];
     float *uv = g_present_uv[uv_i].contents;
-    uv[0] = (float)cx / src.width; uv[1] = (float)cy / src.height; uv[2] = (float)cw / src.width; uv[3] = (float)ch / src.height;
-    uv[4] = (cx + 0.5f) / src.width; uv[5] = (cy + 0.5f) / src.height; uv[6] = (cx + cw - 0.5f) / src.width; uv[7] = (cy + ch - 0.5f) / src.height;
+    uv[0] = (float)(ncx / src.width); uv[1] = (float)(ncy / src.height); uv[2] = (float)(ncw / src.width); uv[3] = (float)(nch / src.height);
+    uv[4] = (float)((ncx + 0.5) / src.width); uv[5] = (float)((ncy + 0.5) / src.height); uv[6] = (float)((ncx + ncw - 0.5) / src.width); uv[7] = (float)((ncy + nch - 0.5) / src.height);
     if (atomic_load_explicit(&g_origin_ll, memory_order_relaxed)) { uv[1] += uv[3]; uv[3] = -uv[3]; }   // lower-left origin: the window image is stored bottom-up
     [g_present_args setAddress:g_present_uv[uv_i].gpuAddress atIndex:0];
     [en setViewport:vp]; [en setRenderPipelineState:g_blit_pso];

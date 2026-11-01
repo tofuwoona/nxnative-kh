@@ -23,6 +23,7 @@
 #include "game_profile.h"
 #include "haptics_apple.h"
 #include "face_swap.h"
+#include "aspect_fill.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
@@ -288,12 +289,16 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
 - (void)pushGame {
     CGRect b = self.bounds; CGFloat w = b.size.width, h = b.size.height;
     if (w <= 0 || h <= 0) return;
-    if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0;
-    CGFloat x0 = (b.size.width - w) / 2, y0 = (b.size.height - h) / 2;
+    double ox, oy, fx, fy; dm_aspect_visible(w, h, &ox, &oy, &fx, &fy);   // DM_ASPECT_FILL=1: the visible (cropped) slice of the 16:9 touch space; otherwise the full frame
+    CGFloat fw = w, fh = h;
+    if (!dm_aspect_fill_on()) { if (fw / fh > 16.0 / 9.0) fw = fh * 16.0 / 9.0; else fh = fw * 9.0 / 16.0; }
+    CGFloat x0 = dm_aspect_fill_on() ? 0 : (b.size.width - fw) / 2, y0 = dm_aspect_fill_on() ? 0 : (b.size.height - fh) / 2;
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = [_game[i] locationInView:self];
-        t[n++] = (dm_touch){(uint32_t)i, (float)fmin(fmax((p.x - x0) / w, 0), 0.999), (float)fmin(fmax((p.y - y0) / h, 0), 0.999)};
+        double nx = ox + fmin(fmax((p.x - x0) / fw, 0), 1) * fx;
+        double ny = oy + fmin(fmax((p.y - y0) / fh, 0), 1) * fy;
+        t[n++] = (dm_touch){(uint32_t)i, (float)fmin(nx, 0.999), (float)fmin(ny, 0.999)};
     }
     dm_touch_set(t, n);
 }
