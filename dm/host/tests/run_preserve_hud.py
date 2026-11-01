@@ -22,3 +22,4 @@ with tempfile.TemporaryDirectory(prefix='kh2-hud-test-',dir=os.environ.get('TMPD
             assert result.returncode == 0, name+' failed'
     if not args.red:
         subprocess.run(['python3',str(ROOT/'dm/host/tests/test_preserve_hud_wiring.py')],check=True)
+        subprocess.run(['python3',str(ROOT/'dm/host/tests/test_ios_image_origin.py')],check=True)
