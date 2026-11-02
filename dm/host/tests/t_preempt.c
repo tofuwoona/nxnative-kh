@@ -58,6 +58,9 @@ static int delayed_wake(unsigned delay, int kind, int exclusion) {
     if (exclusion == 4) worker.host_owned = 1;   // host helper, no guest core
     if (exclusion == 5) worker.pause_req = 1;   // guest suspension
     if (exclusion == 6) { worker_host_work = 1; worker.host_work = &worker_host_work; }   // host GPU work
+#ifdef DM_THREAD_HOST_WAIT
+    if (exclusion == 7) worker.host_wait = 1; // temporary host-mutex wait, not GPU/host-owned
+#endif
     pthread_mutex_lock(&G);
     worker.handle = h_new(O_THREAD, &worker); worker.all = g_all; g_all = &worker;
     pthread_mutex_unlock(&G);
@@ -98,6 +101,13 @@ int main(int argc, char **argv) {
         ok &= delayed_wake(1000, kind, 0);
         ok &= delayed_wake(20000, kind, 0);
     }
-    for (int exclusion = 1; exclusion <= 6; exclusion++) ok &= delayed_wake(20000, 4, exclusion);
+    for (int exclusion = 1; exclusion <= 7; exclusion++) ok &= delayed_wake(20000, 4, exclusion);
+#ifdef DM_THREAD_HOST_WAIT
+    thr_t *self=cur(); assert(thr_runnable(self));
+    int outer=dm_thread_host_wait_begin(); assert(!outer && !thr_runnable(self));
+    int inner=dm_thread_host_wait_begin(); assert(inner && !thr_runnable(self));
+    dm_thread_host_wait_end(inner); assert(!thr_runnable(self));
+    dm_thread_host_wait_end(outer); assert(thr_runnable(self) && !self->host_owned && !dm_host_work);
+#endif
     return ok ? 0 : 1;
 }

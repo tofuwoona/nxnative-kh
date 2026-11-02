@@ -14,6 +14,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <math.h>
+#include <TargetConditionals.h>
 
 enum { NPAD_NO1 = 0, NPAD_HANDHELD = 0x20 };
 enum { STYLE_FULLKEY = 1u << 0, STYLE_HANDHELD = 1u << 1, STYLE_JOYDUAL = 1u << 2, STYLE_JOYLEFT = 1u << 3, STYLE_JOYRIGHT = 1u << 4 };
@@ -29,6 +30,50 @@ _Static_assert(sizeof(NpadState) == 0x28, "NpadState");
 // (dm_pad_set_player). Press edges are latched until the game's next read so short presses are not lost
 static _Atomic uint64_t g_btn, g_axes, g_latch, g_pad_btn[DM_PLAYERS], g_pad_axes[DM_PLAYERS], g_pad_latch[DM_PLAYERS];
 static _Atomic int64_t g_sampling = 1 << 16;   // starts high so the history entries below the newest keep positive sampling numbers
+static _Atomic uint64_t g_input_last_ns;
+uint64_t dm_input_last_event_ns(void) { return atomic_load_explicit(&g_input_last_ns, memory_order_relaxed); }
+// iOS may publish controller state while the launcher is still open. Leave its
+// gate OFF until Play explicitly configures it; Mac keeps lazy env activation.
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+#if TARGET_OS_IPHONE
+static _Atomic int g_input_trace_enabled = 0;
+#else
+static _Atomic int g_input_trace_enabled = -1;
+#endif
+#endif
+void dm_input_trace_configure(void) {
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    const char *e = getenv("DM_KH_INPUT_TRACE");
+    atomic_store_explicit(&g_input_trace_enabled, e && *e && strcmp(e, "0"), memory_order_relaxed);
+#endif
+}
+// Trace front-end publications rather than every guest HID poll. Only changed
+// states are recorded; buttons include shake, axes are signed raw Npad units.
+// Monotonic timestamps share CLOCK_MONOTONIC with the save transaction timer.
+// The existing two-segment iOS stderr rotation bounds this trace with all
+// other diagnostics. Off by default and compiled out for non-KH2 profiles.
+static void kh_input_trace(int source, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    int on = atomic_load_explicit(&g_input_trace_enabled, memory_order_relaxed);
+    if (on < 0) { dm_input_trace_configure(); on = atomic_load_explicit(&g_input_trace_enabled, memory_order_relaxed); }
+    if (!on) return;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct { uint64_t buttons; int32_t a[4]; int seen; } prev[DM_PLAYERS + 1];
+    int slot = source + 1; if (slot < 0 || slot > DM_PLAYERS) return;
+    pthread_mutex_lock(&mu);
+    if (!prev[slot].seen && !buttons && !lx && !ly && !rx && !ry) { prev[slot].seen = 1; pthread_mutex_unlock(&mu); return; }
+    if (prev[slot].seen && prev[slot].buttons == buttons && prev[slot].a[0] == lx && prev[slot].a[1] == ly && prev[slot].a[2] == rx && prev[slot].a[3] == ry) { pthread_mutex_unlock(&mu); return; }
+    prev[slot].seen = 1; prev[slot].buttons = buttons;
+    prev[slot].a[0] = lx; prev[slot].a[1] = ly; prev[slot].a[2] = rx; prev[slot].a[3] = ry;
+    uint64_t t = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+    atomic_store_explicit(&g_input_last_ns, t, memory_order_relaxed);
+    LOG("[input-trace] t_ns=%llu source=%d buttons=%#llx axes=%d,%d,%d,%d", (unsigned long long)t, source,
+        (unsigned long long)buttons, lx, ly, rx, ry); // source -1=front (merged touch+physical iOS), 0..7=pad player
+    pthread_mutex_unlock(&mu);
+#else
+    (void)source; (void)buttons; (void)lx; (void)ly; (void)rx; (void)ry;
+#endif
+}
 static uint64_t pack(int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     return (uint64_t)(uint16_t)lx | (uint64_t)(uint16_t)ly << 16 | (uint64_t)(uint16_t)rx << 32 | (uint64_t)(uint16_t)ry << 48;
 }
@@ -48,11 +93,13 @@ static void shake_note(void) {
 void dm_input_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     uint64_t old = atomic_exchange(&g_btn, buttons); atomic_fetch_or(&g_latch, buttons & ~old); atomic_store(&g_axes, pack(lx, ly, rx, ry));
     shake_note();
+    kh_input_trace(-1, buttons, lx, ly, rx, ry);
 }
 void dm_pad_set_player(int p, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
     if (p < 0 || p >= DM_PLAYERS) return;
     uint64_t old = atomic_exchange(&g_pad_btn[p], buttons); atomic_fetch_or(&g_pad_latch[p], buttons & ~old); atomic_store(&g_pad_axes[p], pack(lx, ly, rx, ry));
     if (!p) shake_note();
+    kh_input_trace(p, buttons, lx, ly, rx, ry);
 }
 void dm_pad_set(uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { dm_pad_set_player(0, buttons, lx, ly, rx, ry); }
 uint64_t dm_input_samples(void) { return (uint64_t)atomic_load(&g_sampling); }
@@ -139,6 +186,16 @@ static void *ctl_main(void *arg) {
                 size_t n = strlen(line); if (!n || line[n - 1] != '\n') break;   // a line still being written: read it next time
                 off += (long)n; line[--n] = 0; if (n && line[n - 1] == '\r') line[--n] = 0;
                 if (!n || line[0] == '#') continue;
+                if (!strncmp(line, "replay ", 7)) {
+#if TARGET_OS_IPHONE
+                    LOG("[RED] DM_CTL replay is Mac-only");
+#else
+                    extern int dm_input_replay_mac_start(const char *path);
+                    int r = dm_input_replay_mac_start(line + 7);
+                    if (r <= 0) LOG("[RED] DM_CTL replay refused (Mac KH2 only; set DM_KH_REPLAY_ALLOW=1, absolute isolated DM_SAVE and matching DM_KH_REPLAY_CONFIRM_SAVE; one replay at a time)");
+#endif
+                    continue;
+                }
                 if (!strncmp(line, "shot ", 5)) { dm_gfx_shot_at(1, line + 5); LOG("DM_CTL: screenshot of the next frame → %s", line + 5); continue; }
                 if (!strncmp(line, "texlist ", 8)) { void dm_gfx_texlist(int target); dm_gfx_texlist(atoi(line + 8)); continue; }
                 if (!strncmp(line, "texraw ", 7)) { void dm_gfx_texraw(uint64_t serial, const char *path); char *e2; uint64_t s = strtoull(line + 7, &e2, 10); while (*e2 == ' ') e2++; dm_gfx_texraw(s, e2); continue; }
@@ -150,6 +207,17 @@ static void *ctl_main(void *arg) {
                 if (!strncmp(line, "env ", 4)) { char *eq = strchr(line + 4, '='); if (eq) { *eq = 0; setenv(line + 4, eq + 1, 1); LOG("DM_CTL: env %s=%s", line + 4, eq + 1); } continue; }
                 if (!strncmp(line, "texdump ", 8)) { void dm_gfx_texdump_next(const char *path); dm_gfx_texdump_next(line + 8); LOG("DM_CTL: colour targets of the next frame → %s (as DM_NVN_TEXDUMP)", line + 8); continue; }
                 if (!strncmp(line, "passdump ", 9)) { void dm_gfx_passdump_next(long n); dm_gfx_passdump_next(atol(line + 9)); LOG("DM_CTL: passes of the next %ld frames (as DM_NVN_PASSDUMP)", atol(line + 9)); continue; }
+                if (!strncmp(line, "pax ", 4)) {
+                    char *end; long id = strtol(line + 4, &end, 10);
+                    if (*end || id < 0 || id > 1) LOG("[RED] DM_CTL pax expects an effect ID of 0 or 1");
+                    else { int r = dm_pax_force_request((int)id);
+                        if (r == 1) LOG("DM_CTL: queued PAX effect ID %ld for the next KH2 PAX event", id);
+                        else if (r == 0) LOG("[RED] DM_CTL pax is disabled; launch this KH2 build with DM_PAX_FORCE=1");
+                        else if (r == -1) LOG("[RED] DM_CTL pax expects an effect ID of 0 or 1");
+                        else LOG("[RED] DM_CTL pax request already pending; wait for the next PAX event");
+                    }
+                    continue;
+                }
                 if (!strncmp(line, "drag ", 5)) {   // one finger, a step every 8 ms
                     float x0, y0, x1, y1, s = 0.3f; if (sscanf(line + 5, "%f %f %f %f %f", &x0, &y0, &x1, &y1, &s) < 4) { LOG("[RED] DM_CTL drag wants x0 y0 x1 y1 [seconds]"); continue; }
                     int n = (int)(s / 0.008f); if (n < 2) n = 2;
@@ -258,6 +326,45 @@ static int states(NpadState *out, int n, uint32_t id, uint32_t style) {
     return n;
 }
 
+// DM_HID_CALLSITE logs the guest return address of each distinct Npad API caller once, plus its first nonzero state.
+static void hid_callsite_note(const char *api, uint32_t id, const NpadState *s, int n, uint64_t lr) {
+    static _Atomic int enabled = -1;
+    int on = atomic_load_explicit(&enabled, memory_order_relaxed);
+    if (on < 0) { on = getenv("DM_HID_CALLSITE") != NULL; atomic_store_explicit(&enabled, on, memory_order_relaxed); }
+    if (!on || !s) return;
+    module_t *m = module_of((void *)lr); const char *mod = m ? m->name : "unmapped";
+    uint64_t off = m ? lr - (uint64_t)m->base : lr;
+    int axes = s->lx || s->ly || s->rx || s->ry;
+    uint64_t face_buttons = s->buttons & 0xffff;
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static struct { uint64_t lr; uint32_t id; const char *api; int seen, axes, face; } seen[64];
+    static int count;
+    pthread_mutex_lock(&mu);
+    int i = 0; while (i < count && (seen[i].lr != lr || seen[i].id != id || strcmp(seen[i].api, api))) i++;
+    if (i == count && count < (int)(sizeof seen / sizeof seen[0])) {
+        seen[i].lr = lr; seen[i].id = id; seen[i].api = api; seen[i].seen = 0; seen[i].axes = 0; seen[i].face = 0; count++;
+    }
+    if (i < count && !seen[i].seen) {
+        seen[i].seen = 1;
+        LOG("HID_CALLSITE %s %s+%#llx id=%#x n=%d sample=%llu buttons=%#llx stick=(%d,%d)(%d,%d) attrs=%#x initial",
+            api, mod, (unsigned long long)off, id, n,
+            (unsigned long long)s->sampling, (unsigned long long)s->buttons, s->lx, s->ly, s->rx, s->ry, s->attributes);
+    }
+    if (i < count && axes && !seen[i].axes) {
+        seen[i].axes = 1;
+        LOG("HID_CALLSITE %s %s+%#llx id=%#x n=%d sample=%llu buttons=%#llx stick=(%d,%d)(%d,%d) attrs=%#x first-stick",
+            api, mod, (unsigned long long)off, id, n,
+            (unsigned long long)s->sampling, (unsigned long long)s->buttons, s->lx, s->ly, s->rx, s->ry, s->attributes);
+    }
+    if (i < count && face_buttons && !seen[i].face) {
+        seen[i].face = 1;
+        LOG("HID_CALLSITE %s %s+%#llx id=%#x n=%d sample=%llu face_buttons=%#llx attrs=%#x first-face-button",
+            api, mod, (unsigned long long)off, id, n,
+            (unsigned long long)s->sampling, (unsigned long long)face_buttons, s->attributes);
+    }
+    pthread_mutex_unlock(&mu);
+}
+
 HLE_FORCE("_ZN2nn3hid14InitializeNpadEv", "connect to the hid service; the host takes input from the front-end state", void, h_hid_InitNpad, void) {}
 // Supported npad ids: players 2..8 are reported only on supported npads; a one-player game ({No1, Handheld}) gets every controller as player 1 (merged_players); a four-player
 // game ({No1..No4, Handheld}) gets players 1..4, and a fifth controller is not used
@@ -274,11 +381,11 @@ static uint32_t g_styles_supported = 0xffffffffu;
 HLE_FORCE("_ZN2nn3hid24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", "supported controller styles; the host records them and picks the reported style from them", void, h_hid_SetStyles, uint32_t styles) {
     if (styles != g_styles_supported) LOG("hid supported controller styles %#x", styles); g_styles_supported = styles; }
 HLE_FORCE("_ZN2nn3hid15GetNpadStyleSetERKj", "controller style query; follows DM_OPMODE", uint32_t, h_hid_GetStyle, const uint32_t *id) { return style_of(*id); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "full-key controller states", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_FULLKEY); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld controller states", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_HANDHELD); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states (not connected on the host)", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYDUAL); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "left Joy-Con states (not connected on the host)", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYLEFT); }
-HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-Con states (not connected on the host)", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { return states(s, n, *id, STYLE_JOYRIGHT); }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", "full-key controller states", int, h_hid_StatesFullKey, NpadState *s, int n, const uint32_t *id) { int r = states(s, n, *id, STYLE_FULLKEY); hid_callsite_note("GetNpadStates.FullKey", *id, r ? s : NULL, n, (uint64_t)__builtin_return_address(0)); return r; }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadHandheldStateEiRKj", "handheld controller states", int, h_hid_StatesHandheld, NpadState *s, int n, const uint32_t *id) { int r = states(s, n, *id, STYLE_HANDHELD); hid_callsite_note("GetNpadStates.Handheld", *id, r ? s : NULL, n, (uint64_t)__builtin_return_address(0)); return r; }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyDualStateEiRKj", "dual Joy-Con states (not connected on the host)", int, h_hid_StatesJoyDual, NpadState *s, int n, const uint32_t *id) { int r = states(s, n, *id, STYLE_JOYDUAL); hid_callsite_note("GetNpadStates.JoyDual", *id, r ? s : NULL, n, (uint64_t)__builtin_return_address(0)); return r; }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadJoyLeftStateEiRKj", "left Joy-Con states (not connected on the host)", int, h_hid_StatesJoyLeft, NpadState *s, int n, const uint32_t *id) { int r = states(s, n, *id, STYLE_JOYLEFT); hid_callsite_note("GetNpadStates.JoyLeft", *id, r ? s : NULL, n, (uint64_t)__builtin_return_address(0)); return r; }
+HLE_FORCE("_ZN2nn3hid13GetNpadStatesEPNS0_17NpadJoyRightStateEiRKj", "right Joy-Con states (not connected on the host)", int, h_hid_StatesJoyRight, NpadState *s, int n, const uint32_t *id) { int r = states(s, n, *id, STYLE_JOYRIGHT); hid_callsite_note("GetNpadStates.JoyRight", *id, r ? s : NULL, n, (uint64_t)__builtin_return_address(0)); return r; }
 HLE_FORCE("_ZN2nn3hid14DisconnectNpadERKj", "disconnect a controller; ignored by the host", void, h_hid_Disconnect, const uint32_t *id) { (void)id; }
 static uint32_t g_hold_type;
 HLE_FORCE("_ZN2nn3hid18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", "Joy-Con hold orientation; the host only records it", void, h_hid_HoldType, int t) { g_hold_type = (uint32_t)t; }
@@ -407,11 +514,11 @@ HLE_FORCE("_ZN2nn3kpr13GetKeyCodeMapEPNS0_10KeyCodeMapE", "keyboard layout key c
 
 // ---------- SDK 12 interfaces (Engage): single GetNpadState, mode queries / setters, touch screen, gestures, six-axis details, controller colors, etc. ----------
 // In the original all of these read hid shared memory or go through the hid service; the host has no shared memory and answers from the same front-end state as above. Library functions that only modify the game's own buffers (vibration file parse / generate, ControllerSupportArg SetDefault / SetExplainText) keep running in the SDK
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", "full-key controller current state", void, h_hid_StateFullKey, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_FULLKEY); }
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", "handheld controller current state", void, h_hid_StateHandheld, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_HANDHELD); }
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", "dual Joy-Con current state (not connected on the host)", void, h_hid_StateJoyDual, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYDUAL); }
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", "left Joy-Con current state (not connected on the host)", void, h_hid_StateJoyLeft, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYLEFT); }
-HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", "right Joy-Con current state (not connected on the host)", void, h_hid_StateJoyRight, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYRIGHT); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", "full-key controller current state", void, h_hid_StateFullKey, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_FULLKEY); hid_callsite_note("GetNpadState.FullKey", *id, s, 1, (uint64_t)__builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", "handheld controller current state", void, h_hid_StateHandheld, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_HANDHELD); hid_callsite_note("GetNpadState.Handheld", *id, s, 1, (uint64_t)__builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", "dual Joy-Con current state (not connected on the host)", void, h_hid_StateJoyDual, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYDUAL); hid_callsite_note("GetNpadState.JoyDual", *id, s, 1, (uint64_t)__builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", "left Joy-Con current state (not connected on the host)", void, h_hid_StateJoyLeft, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYLEFT); hid_callsite_note("GetNpadState.JoyLeft", *id, s, 1, (uint64_t)__builtin_return_address(0)); }
+HLE_FORCE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", "right Joy-Con current state (not connected on the host)", void, h_hid_StateJoyRight, NpadState *s, const uint32_t *id) { fill(s, *id, STYLE_JOYRIGHT); hid_callsite_note("GetNpadState.JoyRight", *id, s, 1, (uint64_t)__builtin_return_address(0)); }
 
 static uint32_t g_comm_mode, g_hh_mode;
 HLE_FORCE("_ZN2nn3hid18GetNpadJoyHoldTypeEv", "Joy-Con hold orientation: returns the value that was set", int, h_hid_GetHold, void) { return (int)g_hold_type; }

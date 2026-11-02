@@ -23,6 +23,41 @@ void crash_set_trap_hook(int (*fn)(ucontext_t *uc));
 #define MAX_PROBE 16
 typedef void (*probe_fn)(ucontext_t *uc);
 static struct { uint64_t at; uint32_t *slot; unsigned hits; char name[40]; long dump, dpost; probe_fn fn; int freg; long foff; uint64_t fval; int hreg; } g_probe[MAX_PROBE];   // dpost: @*xN+off+dpost
+static _Atomic int g_pax_force_pending = -1, g_pax_force_enabled;
+static _Atomic uint64_t g_pax_force_event, g_pax_force_thread;
+static void pax_force_case(ucontext_t *uc) {
+    int id = atomic_load_explicit(&g_pax_force_pending, memory_order_acquire);
+    if (id < 0 || id > 1) return;
+    _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss;
+    uint64_t ev = ss->__x[19], tid = (uint64_t)(uintptr_t)pthread_self();
+    int expected = id;
+    if (!atomic_compare_exchange_strong_explicit(&g_pax_force_pending, &expected, id + 2, memory_order_acq_rel, memory_order_acquire)) return;
+    uint32_t old_case = (uint32_t)ss->__x[8];
+    atomic_store_explicit(&g_pax_force_event, ev, memory_order_release);
+    atomic_store_explicit(&g_pax_force_thread, tid, memory_order_release);
+    ss->__x[8] = 0;   // This is the PAX handler's case dispatch, after its event/owner checks; route this event through case 0.
+    LOG("PAX force: event %#llx case %u -> 0; requested effect ID %d", (unsigned long long)ev, old_case, id);
+}
+static void pax_force_id(ucontext_t *uc) {
+    int state = atomic_load_explicit(&g_pax_force_pending, memory_order_acquire);
+    _STRUCT_ARM_THREAD_STATE64 *ss = &uc->uc_mcontext->__ss;
+    uint64_t ev = ss->__x[19], tid = (uint64_t)(uintptr_t)pthread_self();
+    if (state < 2 || state > 3 || atomic_load_explicit(&g_pax_force_event, memory_order_acquire) != ev ||
+        atomic_load_explicit(&g_pax_force_thread, memory_order_acquire) != tid) return;
+    int id = state - 2;
+    ss->__x[1] = (uint64_t)id;   // case 0's next instructions load the effect ID into x1 before calling the PAX spawner.
+    atomic_store_explicit(&g_pax_force_event, 0, memory_order_release);
+    atomic_store_explicit(&g_pax_force_thread, 0, memory_order_release);
+    atomic_store_explicit(&g_pax_force_pending, -1, memory_order_release);
+    LOG("PAX force: dispatched effect ID %d on the guest event thread (event %#llx)", id, (unsigned long long)ev);
+}
+int dm_pax_force_request(int id) {
+    if (!atomic_load_explicit(&g_pax_force_enabled, memory_order_acquire)) return 0;
+    if (id < 0 || id > 1) return -1;
+    int expected = -1;
+    if (!atomic_compare_exchange_strong_explicit(&g_pax_force_pending, &expected, id, memory_order_acq_rel, memory_order_acquire)) return -2;
+    return 1;
+}
 
 // !xN: treat xN as a sead::ExpHeap and print its free and used blocks (block size at block +0x18, alignment pad at +0x12). Settings (docs/agents/05-debugging.md):
 // DM_PROBE_HEAP=<name>,<start>,<size>,<free list>,<used list> layout by sead version (hex; node offset at list +0x14), default SMBW 0,28,30,b0,c8 (no name), BotW 28,38,40,e0,f8;
@@ -354,6 +389,10 @@ static void watch_install(void) {
 
 #endif
 
+#if TARGET_OS_IPHONE
+int dm_pax_force_request(int id) { (void)id; return 0; }
+#endif
+
 void probe_install(void) {
 #if !TARGET_OS_IPHONE
     crash_set_trap_hook(probe_hit);
@@ -388,6 +427,21 @@ void probe_install(void) {
                 g_probe[g_nprobe - 1].fval = strtoull(e2 + 1, 0, 16);
             }
         }
+    }
+    e = getenv("DM_PAX_FORCE");
+    if (e && !strcmp(e, "1")) {
+        static const char kh2_build[] = "e1bced80ffd14436980f7490b1d3c3e7";
+        if (strcmp(dm_main_build(), kh2_build)) die("DM_PAX_FORCE requires KH2 main build %s (loaded %s)", kh2_build, dm_main_build());
+        module_t *m = NULL;
+        for (int i = 0; i < g_nmod; i++) if (!strcmp(g_mod[i].name, "main")) m = &g_mod[i];
+        if (!m) die("DM_PAX_FORCE: no main module");
+        for (int i = 0; i < g_nprobe; i++)
+            if (g_probe[i].at == (uint64_t)m->base + 0x1eec94 || g_probe[i].at == (uint64_t)m->base + 0x1eecb8)
+                die("DM_PAX_FORCE uses main+0x1eec94 and main+0x1eecb8; remove the duplicate address from DM_PROBE");
+        probe_add(m, 0x1eec94, -1, pax_force_case);
+        probe_add(m, 0x1eecb8, -1, pax_force_id);
+        atomic_store_explicit(&g_pax_force_enabled, 1, memory_order_release);
+        LOG("DM_PAX_FORCE armed: append 'pax 0' or 'pax 1' to DM_CTL; one-shot at the next validated PAX event");
     }
     if (g_slots && !g_slots_sealed) { mprotect(g_slots, 0x4000, PROT_READ | PROT_EXEC); sys_icache_invalidate(g_slots, 0x4000); g_slots_sealed = 1; }
     watch_install();

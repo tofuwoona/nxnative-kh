@@ -48,6 +48,7 @@ if [ "$PREPARE_XCODE" = YES ]; then
 else DM_SCHEME_NAME=DmIOS; fi
 export DM_SCHEME_NAME
 for f in $MODS; do [ -f "$PATCHED/$f.patched.bin" ] && [ -f "$PATCHED/$f.fixups.tsv" ] || die "no rewritten module $PATCHED/$f (run dm/tools/patch_nso.py first)"; done
+python3 "$IOS_SOURCE/tools/check_kh2_direct_patch.py" "$GD/game.tsv" "$PKG" "$PATCHED" || die "wrong KH2 patched program; use the Program 3 modules"
 [ -e "$ROMFS/$MARKER" ] || die "no RomFS at $ROMFS (missing $MARKER)"
 V=$(sed -n 's/^#define DMSH_CHAIN "\(.*\)"/\1/p' "$DM/gfx/nvn/dmsh_chain.h")   # the chain version the host is compiled with, one for every game
 # A Vulkan game (Hades): the shaders are the game's SPIR-V, translated by dm/gfx/tools/vk_shaders.py into $MSL_IOS/vk; an OpenGL game (Digimon Story Cyber Sleuth): its GLSL, translated by
@@ -89,6 +90,11 @@ mkdir -p Gen/dm/font && cp "${STD_FONT:-/System/Library/Fonts/Supplemental/Arial
 # It is scaled to a 1024x1024 PNG in the asset catalog Gen/Assets.xcassets (a single-size app icon; actool generates the other sizes); with neither, no icon is set and the home-screen icon is blank.
 # The catalog is always created (the project always lists it, see project.yml); without an icon it stays empty and DM_APPICON is not set
 ICON=${DM_ICON:-$(dirname "$ROMFS")/icon.jpg}
+# Direct KH2's split Program 3 RomFS has no adjacent control icon. Never
+# silently ship its blank icon, or ignore a misspelled explicit icon path.
+if [ ! -f "$ICON" ] && { [ "$GAME" = 010090C022978003 ] || [ -n "${DM_ICON:-}" ]; }; then
+  die "app icon missing: $ICON; set DM_ICON to the existing game icon"
+fi
 mkdir -p Gen/Assets.xcassets && printf '{"info":{"author":"xcode","version":1}}\n' > Gen/Assets.xcassets/Contents.json || die "asset catalog"
 if [ -f "$ICON" ]; then
   AI=Gen/Assets.xcassets/AppIcon.appiconset; mkdir -p "$AI" || die "mkdir $AI"

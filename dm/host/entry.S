@@ -119,6 +119,16 @@ _dm_gate:
     add sp, sp, #800
     ret
 
+// Private save wrappers use the same process-thread big-stack bridge as FS
+// takeovers. The dispatch function may synchronously call original guest code.
+    .globl _dm_kh2_save_gate
+    .private_extern _dm_kh2_save_gate
+    .p2align 2
+_dm_kh2_save_gate:
+    adrp x16, _dm_kh2_save_dispatch@PAGE
+    add x16, x16, _dm_kh2_save_dispatch@PAGEOFF
+    b _dm_bigstack_enter
+
 // 3) dm_thread_enter(entry, arg, sp): guest thread start. Switch to the guest stack given by the SDK and call entry with x0 = argument;
 //    Horizon threads must exit via ExitThread; returning from entry is reported as an error.
     .globl _dm_thread_enter

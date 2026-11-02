@@ -25,6 +25,10 @@ void dm_ctl_cvar_i32(uint64_t off, int32_t v) { (void)off; (void)v; }
 void dm_ctl_cvar_f32(uint64_t off, float v) { (void)off; (void)v; }
 void dm_gfx_texdump_next(const char *path) { (void)path; }
 void dm_gfx_passdump_next(long n) { (void)n; }
+int dm_pax_force_request(int id) { (void)id; return 0; }   // this test does not link the Mac-only probe handler
+
+int dm_input_replay_mac_start(const char *path) { (void)path; return -1; }
+module_t *module_of(const void *p) { (void)p; return NULL; }
 
 static uint64_t buttons_of(uint32_t id, uint32_t style) { NpadState s; fill(&s, id, style); return s.attributes ? s.buttons & 0xffff : 0; }
 static int32_t lx_of(uint32_t id) { NpadState s; fill(&s, id, STYLE_FULLKEY); return s.lx; }
@@ -146,7 +150,24 @@ static void t_vibration(void) {
     CHECK(!h_hid_VibPermit(), "disconnecting the last output disables vibration");
 }
 
+static void t_input_trace(void) {
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    setenv("DM_KH_INPUT_TRACE", "1", 1);
+    dm_input_set(0, 0, 0, 0, 0);
+    uint64_t before = dm_input_last_event_ns();
+    dm_input_set(DM_BTN_A, 0, 0, 0, 0);
+    uint64_t pressed = dm_input_last_event_ns();
+    CHECK(pressed > before, "a changed front-end input records a monotonic timestamp");
+    usleep(1000);
+    dm_input_set(DM_BTN_A, 0, 0, 0, 0);
+    CHECK(dm_input_last_event_ns() == pressed, "repeated unchanged controller polls do not move the last-input timestamp");
+    dm_input_set(0, 0, 0, 0, 0);
+    CHECK(dm_input_last_event_ns() > pressed, "button release records another input transition");
+#endif
+}
+
 int main(void) {
+    t_input_trace();
     t_slots();
     t_npads();
     t_vibration();

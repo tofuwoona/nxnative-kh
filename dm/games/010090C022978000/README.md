@@ -1,52 +1,62 @@
 # KINGDOM HEARTS - HD 1.5+2.5 ReMIX -
 
-Switch base title `010090C022978000`, base package 1.0.0, SDK 20, Vulkan. The collection launcher is Program 0; KH1 is Program 1 (`010090C022978001`), and KH2 is Program 3 (`010090C022978003`). The registered root profile is **experimental**: the launcher was observed, but selecting a game hung; it is not evidence that the collection is playable or that the standard NSP build produces the direct apps below.
+Experimental Vulkan profiles for the Switch base package 1.0.0 (SDK 20). Only KH1 and KH2 have been tested in this fork. The collection launcher is not a working game-selection route; use the separate direct profiles. See the [root README](../../../README.md) for fork scope, credits and known issues, and the [build guide](../../../docs/KINGDOM_HEARTS.md) for staged inputs and packaging limits.
 
-## Status and boundaries
+## Programs and exact base-build identities
 
-| Target | Status | Limit |
-|---|---|---|
-| Collection launcher | Reached on Mac | Game selection was not fixed. |
-| Direct KH1 | Built and installed on iPhone; user reported save/load and face-swap working | Black HUD bars and broader rendering/gameplay remain open. Shared Program 0 `SettingMenu` files were needed. |
-| Direct KH2 | Built and installed on iPhone; user played; Mac direct build reached Twilight Town | Scene slowdowns remain. The later X/Y-fix IPA was packaged but **not installed or device-tested**. |
+| Target | Program ID | `main` build key | Observed scope |
+| --- | --- | --- | --- |
+| Collection launcher, Program 0 | `010090C022978000` | See [collection profile](game.tsv) | Launcher reached; game selection unsupported |
+| KH1, Program 1 | `010090C022978001` | `badf2faf580b712464365c4d529d92c9` | Separate iPhone app tested; reported save/load and face-button swapping, not complete gameplay coverage |
+| KH2, Program 3 | `010090C022978003` | `e1bced80ffd14436980f7490b1d3c3e7` | Separate iPhone app and Apple-silicon Mac direct-game testing, not all-scene/device coverage |
 
-The tested direct profiles are under `direct-profiles/`, not selected by the collection builder automatically. They contain only derived metadata, not game assets. To query a direct profile from the repository root:
+The [KH1](direct-profiles/010090C022978001/game.tsv) and [KH2](direct-profiles/010090C022978003/game.tsv) profiles each require `main subsdk1 sdk`, with shared `sdk=bc204aae7319bab274894f1cc3f5da92` and `subsdk1=99e21f98a397434b534c1459fc38a2b8`. These identities are build-specific, not support for arbitrary updates. Their rewritten-module reservations are `0x4a00000` and `0x4200000` respectively; these are not total-memory measurements or guarantees for other builds.
+
+From the repository root, query metadata without building or accessing game assets:
 
 ```sh
 DM_GAMES_DIR="$PWD/dm/games/010090C022978000/direct-profiles" \
+DM_GAMES_FIRST=1 \
   python3 dm/games/game.py 010090C022978003 program_id
 ```
 
-The KH2 profile's `mem_used 0x4200000` and KH1's `0x4a00000` reflect observed rewritten module sizes; the full memory range has not been independently characterized. The files under `direct-profiles/` do not implement automatic extraction of Programs 1 and 3 or their shared data. See [release handoff](../../../docs/agents/kh-release-handoff.md) for the local build, resource staging and save boundaries. Keep the user's NSPs, keys, extracted game data, shaders, saves, signed IPAs and provisioning files outside this repository.
+The inherited collection builder does not automatically extract/select these direct programs or stage shared data. KH1 needs the collection's `SettingMenu.hed` and `SettingMenu.pkg` in its staged layout. Supply lawful inputs outside Git; the profiles contain metadata, not assets. A prepared Xcode project, source push or successful CPU suite is not an installed-app update.
 
-## Changes used in the direct builds
+## Save repair and evidence limits
 
-The existing working tree contains the following changes; they need review and separation before committing:
+The original cached-write path can acknowledge a complete record while leaving it only in guest RAM. Its background worker uses an approximately **601-second worker-baseline cadence**, not a fixed delay from menu confirmation. Host flushing alone cannot serialize that cache.
 
-- Vulkan replay: render-pass attachment clear/store behavior, resolve handling, dynamic blend constants and stencil reference. Generic semantics belong in `dm/gfx/vk/`, not in a KH-specific binary patch. Mid-pass clear still needs a focused correctness regression test, including untouched attachments and multisample behavior. The same file also contains opt-in, game-specific shader overrides and tracing that were **diagnostics only** and should not be shipped as fixes.
-- The program-index `MountRom` overload uses `DM_ROMFS_<index>` for another program's shared RomFS, with a fallback to `DM_ROMFS`. KH1 needed Program 0's `SettingMenu` assets; test other multi-program games before treating the fallback as general semantics.
-- An experimental movie decoder event-signaling change is present in the working tree; KH1 movie playback was not verified. Keep it separate from a release-ready patch until its semantics and regressions are tested.
-- Optional SDL2 Mac controller fallback (`SDL2=1`, `DM_SDL_GAMEPAD=1`) and iOS face-button swap setting. The X/Y correction's host test covers the bit transformations; physical and touch behavior of the later IPA remains unverified.
-- The KH2 release shader library retained original alpha discard. Diagnostic raw-texture and no-discard shaders changed visual or coverage behavior and must not be promoted as fixes.
+The reviewed KH2 repair synchronously invokes the **original serializer per complete record**, with shared cache/lifecycle exclusion, positive-length inverse restoration, actual Commit/close-error handling and recoverable PNG-error cleanup. It preserves the original format, direct-filesystem mode and worker cadence. Logical PNG failure uses the existing filesystem poison/rollback engine, not a replacement save writer.
 
-## Experimental KH2 color-processing shader
+Independent source/CPU review and a bounded real Mac menu failure → same-process retry → independent cold-load trial support the KH2 mechanism. KH1's separately mapped port is implemented and independently source/CPU-reviewed, but its actual-menu save/retry/cold-load acceptance remains outstanding. **Physical-iOS acceptance of both new repairs is outstanding.** Existing KH1 save/load reports and shared filesystem tests do not certify the newly built app.
 
-The latest X/Y IPA contains a separately rebuilt fragment shader `80a74ee192e6490b` whose immutable color-vision tables were moved to Metal constant storage. This is **not integrated** into `dm/gfx/tools/vk_shaders.py`. `build_color_experiment.py` preserves the per-shader experiment in a fail-closed, opt-in wrapper: it refuses a generated MSL input different from the validated hash. Given the user's own captured KH2 SPIR-V directory and the normal compiler's dependencies, rebuild into new directories, for example:
+A menu may publish **intermediate valid per-record generations**. Failure of a later record does not undo every earlier Commit. No whole-menu atomicity, sudden-power-loss durability, all-slot coverage or lifecycle guarantee is claimed. Back up `Documents/save` and `Documents/save.work` separately when present, and verify the intended saved row after reopening.
 
-```sh
-python3 dm/games/010090C022978000/build_color_experiment.py \
-  /path/to/kh2/vk_capture /path/to/output/mac --ios /path/to/output/ios
-```
+Read the [save-persistence guide](../../../docs/kh-save-persistence.md) for exact gate/module activation, matching newly built host plus freshly rewritten **all three modules and metadata**, portable CPU commands and optional private-input probes. Do not reuse an older gate set, mix build tables or bypass fail-closed guards. Historical `kh2` filenames/API names alone do not establish KH1 support.
 
-Do not write generated libraries or game-derived shader sources into this repository. A Mac Metal differential test checked 440 gamma/color-vision combinations (1,802,240 RGBA comparisons, zero reported differences) with gamma, color and alpha negative controls; that finite test is not a proof across all inputs, formats or iPhone GPUs. A similar-scene Mac comparison improved from 39.02 FPS / 28.29 ms GPU HUD to 60.00 FPS / 7.57 ms, with slight camera differences; the user reported the optimized build performed well on iPhone. Other scenes still slowed down. Any translator change must preserve and revalidate this experiment; do not generalize the regex rewrite to other shaders.
+## Rendering and controls
 
-## Open issues
+- **MISS effect render fix** (`DM_VK_COALESCE_PASSES`) is **on by default only for exact KH2 Program 3**. It coalesces compatible render passes and reduces, but does not eliminate, effect-heavy stutter. Existing saved `0` and `1` choices are honored; no migration forces it on. `0` disables it, `1` enables it, and explicit env-file overrides take priority over saved preferences. Relaunch after changing an override because native gates are cached. KH1 does not inherit the KH2 default.
+- **Fill screen (crop)** (`DM_ASPECT_FILL=1`) is opt-in; normal `0` fits the original 16:9 picture with bars. Cropping may clip HUD and adds no world view. The temporary **Preserve full HUD** option is removed; legacy `DM_PRESERVE_FULL_HUD` values are inert. True widescreen projection and HUD relocation remain unfinished.
+- KH2 touch geometry places **X on the left, Y at the top**. Positioning does not remap their actions. **Swap face buttons** separately swaps A/B and X/Y for touch and physical controllers.
+- The opt-in [color-processing experiment](build_color_experiment.py) is an input-hash-gated shader step, not an automatic part of the generic shader compiler or a general fix for slow scenes. Keep game-derived shader inputs and output outside Git; retain original alpha-discard semantics and revalidate any translator changes.
 
-- The reported screen ripple on transition from scripted fight camera to player control is **not confirmed to be depth of field**. The mission `miss` PAX is a plausible camera-cut effect; a playback trigger has not been implemented or runtime-verified.
-- Fire effects in a later fight and the Seven Wonders bag encounter have user-reported slowdowns; they have not been isolated in matched captures.
-- An in-game save overwrite reportedly succeeds but old progress appears after restart; the title and slot are unconfirmed. Preserve all committed and working saves; no cause or fix is established.
-- iPad new-game startup failed because Metal rejected BC3 texture format 134; a compatibility fix is not verified.
-- Simulator build was blocked by missing Metal 4 declarations in the tested simulator SDK; no simulator gameplay was demonstrated.
-- Keep 16:9 until projection, render targets, HUD and movies can be tested together. Do not stretch or crop as a widescreen fix.
+See [settings definitions](../settings.tsv) and [shared aspect policy](../../host/aspect_fill.h). Source defaults do not change an existing app installation.
 
-Before updating from upstream, preserve the worktree and compare [the update checklist](../../../docs/agents/kh-upstream-update-reminder.md). Do not claim current work is rebased or compatible with upstream without checking it.
+## Optional diagnostics
+
+Program 3 has three separate **default-OFF** launcher settings: **Save traces** (`DM_SAVE_TRACE`), **Record controller inputs** (`DM_KH_INPUT_TRACE`) and **Detailed render logging** (`DM_KH24_DIAG`). They apply at **Play**, before native gates cache values; relaunch to change them. The MISS rendering setting is independent.
+
+Explicit process diagnostic values take priority over `Documents/env.txt`, then bundled `dm/env.txt`, then saved launcher choices or new-install defaults. Overridden rows are locked; startup does not rewrite their saved preferences or override files. Use `0`/`1`. Legacy process/file `DM_KH24_DIAG=1` defaults save tracing on unless `DM_SAVE_TRACE` is explicit, including `0`. Choosing render logging in the launcher alone does not enable either other toggle.
+
+Normal packaging bundles no `DM_ENV_FILE` override. Check saved choices and existing override files as well as build settings. All three toggles OFF still retain ordinary operational/error logging in `Documents/log.txt` and previous-launch retention in `log.prev.txt`; this is **not zero logging**.
+
+The [continuous-diagnostics template](kh2-24h-diagnostic.env) is explicit opt-in. Any enabled KH2 trace activates two rotating 4 GiB segments at Play, nominally 8 GiB retained plus polling overshoot. Copy both before rotation/relaunch replaces them. High-volume traces can affect performance; CPU rotation tests do not establish on-device rollover acceptance. See [diagnostic guidance](../../../docs/KINGDOM_HEARTS.md#normal-operation-and-optional-diagnostics).
+
+Input records are host-published controller states, not raw touch positions, launcher actions or game randomness. They do not establish deterministic replay or repair saves. The [Mac diagnostic wrapper](../../../scripts/kh2_diag_mac.py) is separately opt-in and requires an explicit copied save path and matching confirmation. Use the existing in-game menu route with isolated copies, never live progress. Do not publish raw logs or personal saves.
+
+## Remaining limits and source-only boundaries
+
+KH1's black HUD bars remain unresolved. Overlapping KH2 effects and other scenes can still stutter; no general performance fix is claimed. iPad compatibility remains unverified after a reported BC3 rejection, and the tested simulator SDK lacked required Metal 4 declarations. Neither simulator nor CPU success replaces physical-device testing. Collection switching and the other collection programs remain unvalidated.
+
+Keep game packages, keys, original/rewritten modules, RomFS, game-derived shaders, artwork, saves, game-containing apps/IPAs, signing material and private evidence outside Git. Share source, synthetic fixtures and sanitized reproduction steps only. The [MIT license](../../../LICENSE) covers runtime source, not third-party game content; dependencies retain their [own licenses](../../third_party/README.md). This documentation is not public-release clearance or certification that historical commits contain no private material.

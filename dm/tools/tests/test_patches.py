@@ -31,7 +31,7 @@ def builds_of(g):   # {build ID: module name} of a profile's build rows (a profi
 
 class Registry(unittest.TestCase):
     def test_no_build_claimed_twice(self):
-        for kind in ('CUTS', 'OBS', 'FRAME_STEP'):
+        for kind in ('CUTS', 'OBS', 'WRAPS', 'FRAME_STEP'):
             seen = {}
             for p, m in MODS.items():
                 for bid in getattr(m, kind, {}):
@@ -43,12 +43,15 @@ class Registry(unittest.TestCase):
                 self.assertRegex(bid, r'^[0-9a-f]{32}$')
                 for off, ob, nb, why in cuts:
                     self.assertTrue(isinstance(off, int) and HEX.match(ob) and HEX.match(nb) and len(ob) == len(nb) and len(ob) % 8 == 0 and why, f'{p} {bid} {off:#x}')
-            for bid, gates in getattr(m, 'OBS', {}).items():
-                for off, oid, word, why in gates:
-                    self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
+            for kind in ('OBS', 'WRAPS'):
+                for bid, gates in getattr(m, kind, {}).items():
+                    self.assertRegex(bid, r'^[0-9a-f]{32}$')
+                    self.assertEqual(len({row[0] for row in gates}), len(gates))
+                    for off, oid, word, why in gates:
+                        self.assertTrue(isinstance(off, int) and isinstance(oid, int) and HEX.match(word) and len(word) == 8 and why, f'{p} {bid} {off:#x}')
             for bid, fn in getattr(m, 'FRAME_STEP', {}).items():
                 self.assertTrue(callable(fn), f'{p} {bid}')
-            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'FRAME_STEP', 'MATCH_CUTS')} - set(dir(__import__('nso_asm'))),
+            self.assertFalse({k for k in vars(m) if k.isupper() and k not in ('CUTS', 'OBS', 'WRAPS', 'FRAME_STEP', 'MATCH_CUTS')} - set(dir(__import__('nso_asm'))),
                              f'{p}: a table patch_nso.py does not read')
 
     def test_function_match_rules(self):
@@ -65,7 +68,11 @@ class Registry(unittest.TestCase):
         for p, m in MODS.items():
             if p.name != 'patches.py': continue
             own = builds_of(p.parent.name)
-            for kind in ('CUTS', 'OBS', 'FRAME_STEP'):
+            # Parent patch registries also own their checked-in direct-program
+            # profiles, whose actual build rows must still validate each key.
+            for derived in p.parent.glob('direct-profiles/*/game.tsv'):
+                own.update(builds_of(game.load(str(derived.parent))))
+            for kind in ('CUTS', 'OBS', 'WRAPS', 'FRAME_STEP'):
                 for bid in getattr(m, kind, {}):
                     self.assertIn(bid, own, f'{p}: {kind} of {bid}, which is no build of profile {p.parent.name}')
                     self.assertNotEqual(own[bid], 'sdk', f'{p}: {bid} is an sdk build; its patches go in dm/tools/sdk_patches.py')

@@ -4,8 +4,12 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include "game_profile.h"   // game profile constants (the RomFS marker path)
+#include "log_rotation.h"
 
 int dm_main(int argc, char **argv);   // dm/host/main.c compiled in with -Dmain=dm_main
 void dm_host_preload_start(int argc, char **argv);
@@ -13,6 +17,22 @@ UIViewController *front_ios_root(void);
 void front_ios_focus_event(int ev);
 
 static char *g_argv[4]; static int g_argc;
+typedef struct { char *active, *previous; } diag_log_paths;
+static void *diag_log_rotate_thread(void *arg) {
+    diag_log_paths *paths = arg;
+    // 20ms poll: worst-case overshoot past the 4 GiB limit is bounded by
+    // however much the game's combined log output can produce in 20ms
+    // (thousands of lines/sec at most in practice), not an unbounded burst.
+    for (;;) {
+        usleep(20000);
+        flockfile(stderr);
+        int result = dm_log_rotate_file(stderr, paths->active, paths->previous, UINT64_C(4) << 30);
+        if (result > 0) fprintf(stderr, "[kh2-diag] log rotated at 4 GiB; previous segment overwritten\n");
+        else if (result < 0) fprintf(stderr, "[RED] kh2 diagnostic log rotation failed errno=%d\n", errno);
+        funlockfile(stderr);
+    }
+    return NULL;
+}
 
 static NSString *romfs_locate(void) {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -20,6 +40,27 @@ static NSString *romfs_locate(void) {
     for (NSString *d in @[[doc stringByAppendingPathComponent:@"romfs"], [NSBundle.mainBundle.resourcePath stringByAppendingPathComponent:@"romfs"]])
         if ([fm fileExistsAtPath:[d stringByAppendingPathComponent:@DM_GAME_ROMFS_MARKER]]) return d;   // only a directory containing the game profile's romfs_marker path counts (Mario: System/Resource, the resource size table)
     return nil;
+}
+
+// Main-thread Play boundary, after LauncherModel.apply and before KH2 preload:
+// host flags and native cached gates must not observe the launcher's defaults.
+static void diag_activate(NSString *doc) {
+    if (DM_GAME_PROGRAM_ID != 0x010090C022978003ull) return;
+    static int once; if (once++) return;
+    const char *s = getenv("DM_SAVE_TRACE"), *i = getenv("DM_KH_INPUT_TRACE"), *r = getenv("DM_KH24_DIAG");
+    int save = s && *s && strcmp(s, "0"), input = i && *i && strcmp(i, "0"), render = r && *r && strcmp(r, "0");
+    if (save) setenv("DM_FS", "1", 0);
+    void dm_input_trace_configure(void); dm_input_trace_configure();
+    if (!save && !input && !render) return;
+    NSString *log = [doc stringByAppendingPathComponent:@"log.txt"], *prev = [doc stringByAppendingPathComponent:@"log.prev.txt"];
+    diag_log_paths *paths = calloc(1, sizeof *paths);
+    if (paths) { paths->active = strdup(log.fileSystemRepresentation); paths->previous = strdup(prev.fileSystemRepresentation); }
+    dm_log_rotate_assert_sole_owner(fileno(stderr));
+    pthread_t thread;
+    if (!paths || !paths->active || !paths->previous || pthread_create(&thread, NULL, diag_log_rotate_thread, paths)) {
+        if (paths) { free(paths->active); free(paths->previous); free(paths); }
+        fprintf(stderr, "[RED] KH2 continuous diagnostic log rotation could not start\n");
+    } else { pthread_detach(thread); fprintf(stderr, "[kh2-diag] continuous traces save=%d input=%d render=%d; log.txt and log.prev.txt rotate at 4 GiB each (8 GiB plus poll overshoot)\n", !!save, !!input, !!render); }
 }
 
 // Boot prerequisites (done before UIApplicationMain): directories / environment variables / log -- the host's early load reads these
@@ -39,6 +80,11 @@ static int boot_env(void) {
     if (freopen(log.fileSystemRepresentation, "w", stderr)) setvbuf(stderr, NULL, _IOLBF, 0);
     // Environment switch files (for on-device diagnostics: a sideloaded app cannot be given environment variables from outside): one KEY=VALUE per line, # starts a comment; Documents/env.txt takes precedence over dm/env.txt in the bundle (put there by build_ipa.sh's DM_ENV_FILE)
     NSMutableArray<NSString *> *from_file = [NSMutableArray array];
+    // Preserve explicit process diagnostics too; otherwise the new default-off
+    // launcher rows would erase an existing environment-based opt-in.
+    if (DM_GAME_PROGRAM_ID == 0x010090C022978003ull)
+        for (NSString *k in @[@"DM_SAVE_TRACE", @"DM_KH_INPUT_TRACE", @"DM_KH24_DIAG"])
+            if (getenv(k.UTF8String)) [from_file addObject:k];
     for (NSString *ef in @[[doc stringByAppendingPathComponent:@"env.txt"], [[res stringByAppendingPathComponent:@"dm"] stringByAppendingPathComponent:@"env.txt"]]) {
         NSString *txt = [NSString stringWithContentsOfFile:ef encoding:NSUTF8StringEncoding error:nil];
         for (NSString *raw in [txt componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
@@ -48,7 +94,13 @@ static int boot_env(void) {
             if (!getenv(k.UTF8String)) { setenv(k.UTF8String, v.UTF8String, 0); [from_file addObject:k]; fprintf(stderr, "boot: env %s=%s (%s)\n", k.UTF8String, v.UTF8String, ef.lastPathComponent.UTF8String); }
         }
     }
-    setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (Launcher.swift)
+    // Legacy env-file/process DM_KH24_DIAG opt-in included save diagnostics.
+    // Keep that default, but honor an explicit DM_SAVE_TRACE=0. A renderer-only
+    // launcher choice is applied later and does not implicitly enable saves.
+    if (DM_GAME_PROGRAM_ID == 0x010090C022978003ull && getenv("DM_KH24_DIAG") && atoi(getenv("DM_KH24_DIAG")) && !getenv("DM_SAVE_TRACE")) {
+        setenv("DM_SAVE_TRACE", "1", 0); [from_file addObject:@"DM_SAVE_TRACE"];
+    }
+    setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // launcher preserves explicit overrides, including the legacy save default
     if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0);   // Metal reads it when the process makes its first device (the early loading below may make it)
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG
     // (or the launcher, which replaces this default before the game starts)
@@ -69,7 +121,9 @@ static int boot_env(void) {
     if ([fm fileExistsAtPath:aoc]) setenv("DM_AOC_DIR", aoc.fileSystemRepresentation, 0);
     chdir(doc.fileSystemRepresentation);
     g_argv[0] = strdup("dmhost"); g_argv[1] = strdup(dm.fileSystemRepresentation); g_argc = 2;
-    dm_host_preload_start(g_argc, g_argv);   // Module tables / relocation / takeover run early in the background, in parallel with UIKit startup (and the launcher: the settings it sets are read when the game starts)
+    // KH2 waits for Play: preload itself caches DM_FS and can publish input.
+    // Other profiles retain the existing early background loading.
+    if (DM_GAME_PROGRAM_ID != 0x010090C022978003ull) dm_host_preload_start(g_argc, g_argv);
     return 1;
 }
 static int g_boot_ok;
@@ -83,6 +137,8 @@ static void *boot_thread(void *p) {
 }
 void front_ios_boot(void) {   // Called by front_ios.m once the window and Metal view exist
     static int once; if (once++ || !g_boot_ok) return;
+    diag_activate(NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES)[0]);
+    if (DM_GAME_PROGRAM_ID == 0x010090C022978003ull) dm_host_preload_start(g_argc, g_argv);
     void front_ios_audio_session(void); front_ios_audio_session();   // set a short I/O buffer before the game opens audio output (front_ios.m)
     pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 64u << 20);   // the Switch main thread stack is set by npdm; the host gives plenty
     pthread_t t; pthread_create(&t, &a, boot_thread, NULL); pthread_detach(t);

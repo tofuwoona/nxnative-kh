@@ -55,6 +55,7 @@ typedef struct thr {
     // Current wait: kind 0=none 1=lock 2=condition 3=address 4=synchronization object
     int wkind, woke; uint64_t waddr, wkey; uint32_t wtag; int64_t wres;
     _Atomic int sleeping;      // inside SleepThread's timed sleep (not runnable; used by dm_yield_to_core_peers)
+    _Atomic int host_wait;     // narrowly scoped host mutex wait; restored on acquisition, including nesting
     int yield_pending;         // this caller woke a higher-priority thread pinned to its core: hand off before returning to guest code
     _Atomic int *host_work;    // points at the thread's dm_host_work (registered when the thread starts)
     int host_owned;            // a guest thread the host created itself (dm_guest_thread_spawn): it waits in host code and is not one of the game's threads
@@ -122,8 +123,17 @@ static thr_t *cur(void) {
 void dm_thread_mark_host(void) { thr_t *t = pthread_getspecific(g_keythr); if (t) t->host_owned = 1; }
 // Holding G. wake() clears wkind before the pthread resumes; it must already count as runnable in that window, even if Mach still reports WAITING / STOPPED.
 // Explicit host GPU work does not occupy a guest core. Ordinary host dispatch delays and HLE calls do, until a guest wait / sleep / exit says otherwise.
+#define DM_THREAD_HOST_WAIT 1
+int dm_thread_host_wait_begin(void) {
+    thr_t *t=pthread_getspecific(g_keythr);
+    return t ? atomic_exchange(&t->host_wait,1) : 0;
+}
+void dm_thread_host_wait_end(int previous) {
+    thr_t *t=pthread_getspecific(g_keythr);
+    if (t) atomic_store(&t->host_wait,previous);
+}
 static int thr_runnable(const thr_t *t) {
-    return !t->wkind && !t->sleeping && !t->pause_req && !(t->host_work && *t->host_work);
+    return !t->wkind && !t->sleeping && !t->host_wait && !t->pause_req && !(t->host_work && *t->host_work);
 }
 int dm_yield_to_core_peers(void) {
     thr_t *self = pthread_getspecific(g_keythr); if (!self) return 0;

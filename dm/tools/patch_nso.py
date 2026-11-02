@@ -66,12 +66,13 @@ else:
 #   CUTS = {build ID: [(offset, original bytes, new bytes, reason)]}: before rewriting, the original bytes are asserted one by one and any mismatch aborts (listed in <name>.cuts.tsv)
 #   OBS = {build ID: [(offset, number, original instruction word, reason)]}: observation gates. Numbers match OBS_* in the host's hle.h; the original instruction must be position
 #     independent (no PC-relative / branch / anything involving x18 or tpidr), asserted offline; when the host has no callback attached the gate block goes in and out once and returns
+#   WRAPS = {build ID: [(entry offset, host wrapper ID, original word, reason)]}: KH2-only integer-register AAPCS64 around-call gates. Only stack prologues at unwind function entries may be displaced; metadata kind kh2wrap, callable ORIGINAL body at gate returnpoint+8. The host validates the complete exact-build set before guest execution.
 #   FRAME_STEP = {build ID: function(ctx)}: the frame step stubs of a main ("Frame step in whole vsyncs" below)
 #   MATCH_CUTS = {module name: [nso_match rule, ...]}: fallback for modules without registered CUTS. Only the repository profile selected by DM_GAME participates,
 #     including when DM_GAMES_DIR selects a derived profile. Missing or ambiguous matches are reported and skipped; known builds retain their exact CUTS.
 PATCH_FILES = [os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sdk_patches.py')] + sorted(glob.glob(os.path.join(os.path.dirname(os.path.abspath(__file__)), '../games/*/patches.py')))
 def load_patches():
-    tables, where = {'CUTS': {}, 'OBS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}}, {}
+    tables, where = {'CUTS': {}, 'OBS': {}, 'WRAPS': {}, 'FRAME_STEP': {}, 'MATCH_CUTS': {}}, {}
     for n, path in enumerate(PATCH_FILES):
         spec = importlib.util.spec_from_file_location(f'patches_{n}', path); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
         for kind, table in tables.items():
@@ -321,6 +322,23 @@ def site_obs(off, oid, word):
     emit(word)
     emit(B(here(), off + 4))
     gates.append((ret, 'obs', oid, off))
+    return start
+
+def site_wrap(off, wid, word):
+    """KH2 integer-only around-call gate, with callable original entry at ret+8.
+    The host must never call the patched entry itself. No runtime code generation.
+    Validation at the installation loop restricts displacement to a stack prologue.
+    """
+    start = here()
+    emit(STP_PRE(29, 30, 31, -16))
+    emit_gate_call()
+    emit(BLR(30))
+    ret = here()
+    emit(LDP_POST(29, 30, 31, 16))
+    emit(0xd65f03c0)  # ret to original caller, not into the original body
+    emit(word)        # callable body: original stack prologue
+    emit(B(here(), off + 4))
+    gates.append((ret, 'kh2wrap', wid, off))
     return start
 
 # ---- Exclusive windows ----
@@ -881,6 +899,15 @@ for off, oid, ow, why in obs:
     assert off in set(starts) or after_bl or scratch_dead(off), f'observation gate neither at a function entry, after a bl nor before a call with x9–x17 unread {off:#x}'
     assert off < TEXT_END and off not in kinds and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'observation gate conflicts with a rewrite site {off:#x}'
     put_branch(off, site_obs(off, oid, w)); stat('obs')
+
+wraps = list(PATCHES['WRAPS'].get(BUILD_ID, []))
+for off, wid, ow, why in wraps:
+    w = struct.unpack_from('<I', IMG, off)[0]
+    assert f'{w:08x}' == ow, f'wrapper original instruction mismatch {off:#x}: {w:08x}'
+    ins = dis(w, off)
+    assert off in set(starts) and (ins.mnemonic in ('stp', 'sub') and 'sp' in ins.op_str) and not has18(ins), f'wrapper requires a stack prologue {off:#x}'
+    assert off < TEXT_END and off not in kinds and off not in {x[0] for x in obs} and not any(lo <= off < hi for wseg in windows for lo, hi in [(wseg[0].address, wseg[-1].address + 4)]), f'wrapper conflicts with rewrite site {off:#x}'
+    put_branch(off, site_wrap(off, wid, w)); stat('kh2wrap')
 
 # ---- Frame step in whole vsyncs (the mains whose patch file has FRAME_STEP: The Legend of Zelda: Tears of the Kingdom 1.4.3, Breath of the Wild 1.9.0, Hyrule Warriors: Age of Calamity 1.3.0,
 # Paper Mario: The Thousand-Year Door 1.0.1 and ASTRAL CHAIN 1.0.1; host only) ----

@@ -15,6 +15,13 @@ static ssize_t fake_pwrite(int fd, const void *buf, size_t n, off_t off);
 #include "../hle_fs.c"
 #undef pwrite
 ssize_t pwrite(int, const void *, size_t, off_t);
+#ifndef DM_FS_REJECT_SAVE_ADAPTER
+// RED baseline: without a rejection adapter the caller can only Commit.
+static uint32_t dm_fs_reject_save(const char *name, int error) { (void)error; return h_fs_Commit(name); }
+#endif
+
+static uint64_t fake_last_input_ns;
+uint64_t dm_input_last_event_ns(void) { return fake_last_input_ns; }
 
 struct dm_flags g_flag; uint64_t g_t0_ns; uint64_t now_ns(void) { return 0; }   // stubs for log timestamps and the read path (not used by the write path)
 void dm_guest_write_prepare(void *a, size_t n) { (void)a; (void)n; }
@@ -106,7 +113,7 @@ int main(void) {
     // 6a Recloning after a refused commit fails: do not exit, the work directory is untouched and the committed version unchanged; the next commit is refused again and the reclone succeeds; the transaction after that commits normally
     setenv("DM_TEST_FS_FAILAT", "reclone:1", 1);
     CHECK(write_save("save:/a", "bad") == RES_OK, "write a=bad");
-    save_poison(ENOSPC); int nf0 = g_nfail;   // a save write of this transaction failed
+    save_poison(0, ENOSPC); int nf0 = g_nfail; // a save write of this transaction failed
     CHECK(h_fs_Commit("save") == RES_FAIL && g_nfail == nf0 + 1, "this transaction is refused (injected reclone failure), the process is still alive, front end notified once");
     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "new"), "committed directory a is still new");
     snprintf(p, sizeof p, "%s/a", work); CHECK(same(p, "bad"), "work directory not deleted (a is still bad)");
@@ -136,7 +143,78 @@ int main(void) {
     CHECK(h_fs_MountSave("save", NULL) == RES_OK && write_save("save:/a", "ok3") == RES_OK && h_fs_Commit("save") == RES_OK, "remount without injection: transactional as usual, writing a=ok3 and committing succeed");
     snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "committed a = ok3");
 
+    printf("⑦ ignored delete failure must not publish stale save as a successful overwrite\n");
+    setenv("DM_TEST_FS_FAILAT", "delete:1", 1); nf0 = g_nfail;
+    CHECK(h_fs_DeleteFile("save:/a") != RES_OK, "simulated delete of old slot fails");
+    CHECK(h_fs_Commit("save") == RES_FAIL, "commit refuses an overwrite whose delete failed");
+    CHECK(g_nfail == nf0 + 1, "front end is notified of the failed save");
+    snprintf(p, sizeof p, "%s/a", save); CHECK(same(p, "ok3"), "committed old slot remains intact");
+    unsetenv("DM_TEST_FS_FAILAT");
 
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    printf("⑧ KH2 save paths with Windows separators and slash separators refer to the same slot\n");
+    setenv("DM_KH2_SAVE_FIX_MIGRATE", "1", 1);   // this test exercises the opt-in save-fix, not the passive diagnostic build
+    g_nmnt = 0;
+    snprintf(p, sizeof p, "%s/\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", save); put(p, "old-slot");
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK, "remount an exported legacy KH2 save");
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", got, sizeof got) && !strcmp(got, "old-slot"), "legacy backslash spelling reads the old slot");
+    CHECK(read_fs("save:/KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png", got, sizeof got) && !strcmp(got, "old-slot"), "slash spelling reads the same old slot");
+    CHECK(write_save("save:/KINGDOM HEARTS HD 1.5+2.5 ReMIX/KHIIFM.png", "new-slot") == RES_OK, "overwrite the canonical slot");
+    CHECK(h_fs_Commit("save") == RES_OK, "commit the overwritten slot");
+    g_nmnt = 0; CHECK(h_fs_MountSave("save", NULL) == RES_OK, "restart with the committed save");
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", got, sizeof got) && !strcmp(got, "new-slot"), "after restart the backslash load sees the new slot, not the stale legacy file");
+    snprintf(p, sizeof p, "%s/\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHIIFM.png", save); CHECK(same(p, "old-slot"), "original legacy file remains untouched for backup safety");
+#endif
+#if DM_GAME_PROGRAM_ID == 0x010090C022978001ull
+    printf("⑧ KH1 backslash-path save persists across restart\n");
+    g_nmnt = 0;
+    snprintf(save, sizeof save, "%s/kh1-save", root);
+    char khdir[1200]; snprintf(khdir, sizeof khdir, "%s/KINGDOM HEARTS HD 1.5+2.5 ReMIX", save);
+    mkdir(save, 0755); mkdir(khdir, 0755);
+    snprintf(p, sizeof p, "%s/KHFM.png", khdir); put(p, "old");
+    setenv("DM_SAVE", save, 1);
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK, "KH1 save mount");
+    CHECK(write_save("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png", "new") == RES_OK, "KH1 write via backslash path");
+    CHECK(h_fs_Commit("save") == RES_OK && same(p, "new"), "KH1 canonical file committed");
+    g_nmnt = 0; CHECK(h_fs_MountSave("save", NULL) == RES_OK, "KH1 remount");
+    CHECK(read_fs("save:\\KINGDOM HEARTS HD 1.5+2.5 ReMIX\\KHFM.png", got, sizeof got) && !strcmp(got, "new"), "KH1 read after restart");
+#endif
+#if DM_GAME_PROGRAM_ID == 0x010090C022978003ull
+    printf("⑨ Save input-to-commit timing uses last transition before the first write\n");
+    g_nmnt = 0;
+    unsetenv("DM_SAVE");
+    snprintf(save, sizeof save, "%s/input-time-save", root);
+    mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "before");
+    setenv("DM_SAVE", save, 1);
+    CHECK(h_fs_MountSave("save", NULL) == RES_OK, "mount timing fixture");
+    fake_last_input_ns = clock_gettime_nsec_np(CLOCK_MONOTONIC) - 1000000000ull;
+    CHECK(write_save("save:/a", "after") == RES_OK, "first save write succeeds");
+    CHECK(atomic_load(&g_txn_input_ns) == fake_last_input_ns, "first write captures the preceding input timestamp");
+    fake_last_input_ns += 500000000ull;
+    CHECK(write_save("save:/a", "final") == RES_OK, "second write succeeds");
+    CHECK(atomic_load(&g_txn_input_ns) == fake_last_input_ns - 500000000ull, "later input does not change the transaction's initial input anchor");
+    CHECK(h_fs_Commit("save") == RES_OK, "timed commit succeeds");
+    CHECK(atomic_load(&g_txn_input_ns) == 0, "commit clears the input timing anchor for the next save");
+    fake_last_input_ns = 0;
+#endif
+
+    // A logical PNG failure must reject a transaction even if all host writes
+    // succeeded. The narrow adapter must use the same rollback/retry engine.
+    {
+        g_nmnt = 0; unsetenv("DM_TEST_FS_FAIL");
+        snprintf(save, sizeof save, "%s/logical-error", root);
+        mkdir(save, 0755); snprintf(p, sizeof p, "%s/a", save); put(p, "OLD");
+        setenv("DM_SAVE", save, 1);
+        CHECK(h_fs_MountSave("save", NULL) == RES_OK, "mount logical-error fixture");
+        CHECK(write_save("save:/a", "PARTIAL") == RES_OK, "host write need not fail for PNG encoder to fail");
+        int before = g_nfail;
+        CHECK(dm_fs_reject_save("save", EIO) != RES_OK && g_nfail == before+1,
+              "logical rejection refuses publication and notifies exactly once");
+        CHECK(same(p,"OLD"), "logical PNG error preserves old canonical generation");
+        CHECK(write_save("save:/a", "RETRY") == RES_OK && h_fs_Commit("save") == RES_OK && same(p,"RETRY"),
+              "full rewrite retries after logical rejection without permanent poison");
+        CHECK(dm_fs_reject_save("unknown", EIO) != RES_OK, "unknown mount cannot report success");
+    }
     char cmd[1200]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", root); system(cmd);
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;

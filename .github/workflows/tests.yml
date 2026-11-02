@@ -99,6 +99,42 @@ jobs:
           path: logs
           retention-days: 7
 
+  cpu-save-tests:
+    name: CPU-only save regressions (synthetic fixtures)
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+          cache-dependency-path: .github/workflows/tests.yml
+      - name: Install the Python packages the tools import
+        run: python -m pip install lz4 capstone fonttools
+      # Keep modes serial; FS/path headers are generated in their owned output directories.
+      - name: Run synchronous-save, filesystem and path regressions
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d "$RUNNER_TEMP/cpu-save-tests.XXXXXX")
+          python dm/host/tests/run_kh2_sync.py --out "$out/sync" 2>&1 | tee "$out/sync.log"
+          DM_SAVE_TEST_OUT="$out/fs-plain" python dm/host/tests/run_save_review.py 2>&1 | tee "$out/fs-plain.log"
+          DM_SAVE_TEST_OUT="$out/fs-asan-ubsan" python dm/host/tests/run_save_review.py --sanitize 2>&1 | tee "$out/fs-asan-ubsan.log"
+          DM_SAVE_PATH_OUT="$out/path-plain" python dm/host/tests/run_save_path_resolution.py 2>&1 | tee "$out/path-plain.log"
+          DM_SAVE_PATH_OUT="$out/path-asan-ubsan" python dm/host/tests/run_save_path_resolution.py --sanitize 2>&1 | tee "$out/path-asan-ubsan.log"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: logs-cpu-save-tests
+          path: |
+            ${{ runner.temp }}/cpu-save-tests.*/**/*.json
+            ${{ runner.temp }}/cpu-save-tests.*/**/*.log
+          retention-days: 7
+
   build:
     name: Build check (Mac host, gfx tests, iOS sources)
     runs-on: macos-26

@@ -6,6 +6,7 @@
 
 struct dm_flags g_flag;
 uint64_t now_ns(void) { return 0; }
+void gate_kh2_prepare(void) {} // loader-only fixture; repair policy is exercised by t_kh2_gates/dispatch
 void gate_register(uint64_t a, const char *k, int n, uint64_t o) { (void)a; (void)k; (void)n; (void)o; }
 void hlecount_seal(void) {}
 void *hlecount_wrap(const char *kind, const char *name, void *fn) { (void)kind; (void)name; return fn; }

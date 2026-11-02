@@ -5,10 +5,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "log_line.h"
 #include "game_profile.h"   // constants of the current game profile (generated from dm/games/<id>/game.tsv, chosen by the Makefile's GAME)
 
 #define MAX_MOD 128   // the profile's modules (up to 8) and the NROs a game loads at run time (Super Smash Bros. Ultimate: 98)
-#define LOG(...) do { fprintf(stderr, "[dm] " __VA_ARGS__); fputc('\n', stderr); } while (0)
+// One fprintf call per line via the shared DM_LOG_LINE primitive (log_line.h):
+// with stderr set _IOLBF, a rotation's flockfile() can only ever land between
+// calls, never mid-line, so a rotation can never split a log line across the
+// old and new segment. fmt must be a string literal (adjacent-literal
+// concatenation requires it). dm/ios/tests/t_log_rotation.c tests this exact
+// primitive under a concurrent writer + rotator.
+#define LOG(fmt, ...) DM_LOG_LINE(stderr, "[dm] ", fmt, ##__VA_ARGS__)
 #define die(...) do { LOG("FATAL " __VA_ARGS__); abort(); } while (0)
 
 typedef struct { uint32_t st_name; uint8_t st_info, st_other; uint16_t st_shndx; uint64_t st_value, st_size; } Elf64_Sym;
@@ -78,6 +85,7 @@ void gate_obs_set(int id, void (*fn)(const uint64_t *regs));
 int gate_obs_present(int id);
 uint64_t now_ns(void);
 uint64_t guest_ns(void);              // Guest clock (hle_os.c; does not advance while frozen, guest_clock_freeze)
+
 int dm_detclock_enabled(void);
 void dm_guest_clock_advanced(void);
 void guest_clock_freeze(int on);
@@ -91,6 +99,7 @@ void crash_watch_progress(uint32_t tick, const char *stage);
 void crash_watch_frame(void);
 void crash_watch_pregame_done(void);
 uint64_t crash_watch_progress_count(void);
+int dm_pax_force_request(int id);   // Mac debug-only: queue a one-shot KH2 PAX effect override through the game event thread
 void crash_dump_now(const char *why);   // Dump state on demand (threads + graphics wait points), without exiting
 // Diagnostic switches: read once from environment variables when main starts (getenv takes the libc global environment lock, and on a hot path it would make all guest threads queue up)
 extern uint64_t g_t0_ns;   // Host start time (now_ns), used for relative times in the log
