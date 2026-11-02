@@ -12,7 +12,7 @@ Experimental **Kingdom Hearts–focused fork** of [seedds/nxnative](https://gith
 | KH2 — direct Program 3 | A separate app on a physical iPhone; direct-game testing on an Apple-silicon Mac | Every scene, save slot, controller, lifecycle transition or device |
 | Collection launcher — Program 0 | Launcher startup | Working game selection: switching to another program is still unsupported |
 
-Source changes, CPU tests, an app build and an installed app are different milestones. **A commit on a branch does not update an installed app.** New defaults, save fixes and KH1 backports must be integrated, rebuilt and separately tested before being described as delivered. The KH1 save-hardening backport is in progress; this README does not announce a new KH1 IPA or installation.
+Source changes, CPU tests, an app build and an installed app are different milestones. **A commit on a branch does not update an installed app.** New defaults, save fixes and KH1 backports must be integrated, rebuilt and separately tested before being described as delivered. A separate clean KH1 save-hardening backport has been committed and is undergoing independent review; this README does not announce a new KH1 IPA or installation.
 
 ## Current features
 
