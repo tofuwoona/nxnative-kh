@@ -29,7 +29,10 @@ class XcodePipelineTests(unittest.TestCase):
                 with self.subTest(graphics=graphics, derived=derived):
                     self.prepare_fixture(graphics, derived)
 
-    def prepare_fixture(self, graphics, derived):
+    def test_diagnostic_environment_requires_explicit_cli_optin(self):
+        self.prepare_fixture('vulkan', False, env_file=REPO / 'dm/games/010090C022978000/kh2-24h-diagnostic.env')
+
+    def prepare_fixture(self, graphics, derived, env_file=None):
         with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
             root = Path(temporary).resolve()
             (root / 'prod.keys').touch()
@@ -60,6 +63,8 @@ class XcodePipelineTests(unittest.TestCase):
             }.items():
                 mocks[name] = stack.enter_context(patch.object(build, name, return_value=value))
             stack.enter_context(patch.dict(os.environ))  # derived profiles change the tool search environment
+            os.environ.pop('DM_ENV_FILE', None)  # a shell assignment is itself an explicit opt-in
+            self.assertEqual(build.DM_ENV_FILE, '', 'regular NSP preparation must not select a diagnostic template')
             stack.enter_context(patch.object(game, 'by_title', return_value=registered))
             stack.enter_context(patch.object(game, 'load', return_value=profile))
             stack.enter_context(patch.object(profile_guess, 'build_sources', return_value=sources))
@@ -75,7 +80,8 @@ class XcodePipelineTests(unittest.TestCase):
             try:
                 with redirect_stdout(output):
                     code = build.cli([str(root), '-k', str(root / 'prod.keys'), '--prepare-xcode',
-                                      '--language', 'ja', '--no-show-fps', '--progress', 'json'])
+                                      '--language', 'ja', '--no-show-fps', '--progress', 'json']
+                                     + (['--env-file', str(env_file)] if env_file else []))
             finally:
                 progress.close()
             self.assertEqual(code, 0)
@@ -85,6 +91,10 @@ class XcodePipelineTests(unittest.TestCase):
             command = mocks['run'].call_args.args[0]
             self.assertEqual(command[-1], '--prepare-xcode')
             environment = mocks['run'].call_args.kwargs['env']
+            if env_file:
+                self.assertEqual(environment['DM_ENV_FILE'], str(env_file.resolve()))
+            else:
+                self.assertNotIn('DM_ENV_FILE', environment, 'regular preparation auto-bundled diagnostics')
             self.assertEqual(environment['DM_LANG'], 'ja')
             self.assertEqual(environment['DM_SHOW_FPS'], '0')
             self.assertEqual(environment['GFXAPI'], graphics)
