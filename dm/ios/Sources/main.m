@@ -69,7 +69,7 @@ static int boot_env(void) {
         }
     }
     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (Launcher.swift)
-    if (getenv("DM_KH24_DIAG") && atoi(getenv("DM_KH24_DIAG")) && !strcmp(DM_GAME_ID, "010090c022978003")) {
+    if (getenv("DM_KH24_DIAG") && atoi(getenv("DM_KH24_DIAG")) && DM_GAME_PROGRAM_ID == 0x010090C022978003ull) {
         setenv("DM_FS", "1", 1);
         setenv("DM_SAVE_TRACE", "1", 1); // KH2 uses Vulkan: hle_vk.m records its actual Metal passes under DM_KH24_DIAG
         diag_log_paths *paths = calloc(1, sizeof *paths);

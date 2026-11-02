@@ -230,8 +230,17 @@ int main(int argc, char **argv) {
             src, exe = root / 'boot.m', root / 'boot'
             src.write_text(harness)
             for profile in (GAME, '010090C022978001'):
+                # Use the production generator and exact emitted ID casing.
+                # A lowercase mock hid a case-sensitive boot-gate regression.
+                header = root / profile / 'game_profile.h'
+                header.parent.mkdir()
+                profile_env = dict(clean_env(), DM_GAMES_DIR=str(PROFILES), DM_GAMES_FIRST='1')
+                subprocess.run([sys.executable, str(ROOT / 'dm/games/game.py'),
+                                'header', profile, str(header)], env=profile_env,
+                               check=True, capture_output=True)
+                self.assertIn('#define DM_GAME_ID "' + profile + '"', header.read_text())
                 subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-framework', 'Foundation',
-                                '-DDM_GAME_ID="' + profile.lower() + '"', str(src), '-o', str(exe)],
+                                '-include', str(header), str(src), '-o', str(exe)],
                                check=True, capture_output=True)
                 cases = [
                     ('release', None, None, None, 'absent', 'absent'),
