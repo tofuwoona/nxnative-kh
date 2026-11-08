@@ -24,6 +24,7 @@
 #include "haptics_apple.h"
 #include "face_swap.h"
 #include "aspect_fill.h"
+#include "kh2_aspect.h"
 
 enum { B_A = 0, B_B, B_X, B_Y, B_LS, B_RS, B_L, B_R, B_ZL, B_ZR, B_PLUS, B_MINUS, B_LEFT, B_UP, B_RIGHT, B_DOWN, B_N };
 enum { C_NONE = 0, C_STICK, C_DPAD, C_FACE, C_BTN, C_SWAP, C_GAME };   // which control a touch holds; C_GAME: none, the touch goes to the game's touch screen (finger slot << 8)
@@ -298,6 +299,11 @@ static CGFloat dist(CGPoint a, CGPoint b) { return hypot(a.x - b.x, a.y - b.y); 
     CGFloat fw = w, fh = h;
     if (!dm_aspect_fill_on()) { if (fw / fh > 16.0 / 9.0) fw = fh * 16.0 / 9.0; else fh = fw * 9.0 / 16.0; }
     CGFloat x0 = dm_aspect_fill_on() ? 0 : (b.size.width - fw) / 2, y0 = dm_aspect_fill_on() ? 0 : (b.size.height - fh) / 2;
+    dm_kh2_extent size = dm_kh2_aspect_size();
+    if (size.width) {
+        dm_kh2_aspect_fit(size.width, size.height, w, h, &x0, &y0, &fw, &fh);
+        ox = oy = 0; fx = fy = 1;   // full wide source, never the legacy 16:9 crop
+    }
     dm_touch t[16]; int n = 0;
     for (int i = 0; i < 16; i++) if (_game[i]) {
         CGPoint p = [_game[i] locationInView:self];

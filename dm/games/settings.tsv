@@ -15,7 +15,7 @@ DM_SHOW_FPS	toggle	-	build:DM_SHOW_FPS	always	Frame-rate counter
 DM_METAL_HUD	toggle	-	0	always	Performance HUD
 DM_TOUCH_HAPTICS	toggle	-	1	always	Touch feedback
 DM_SWAP_FACE_BUTTONS	toggle	-	0	always	Swap face buttons	Swap A/B and X/Y for touch and physical controllers.
-DM_ASPECT_FILL	toggle	-	0	game:010090C022978001,010090C022978003	Fill screen (crop)	Remove black bars by cropping the top/bottom or sides of the 16:9 image. May cut off HUD; off by default.
+DM_KH2_ASPECT_EXPERIMENT	toggle	-	1	game:010090C022978001,010090C022978003	Native display aspect	Match the startup display/window ratio without cropping the HUD (16:9 through 20:9). Unsupported sizes restore 16:9. Off restores 16:9. Relaunch to change.
 DM_VK_COALESCE_PASSES	toggle	-	1	game:010090C022978003	MISS effect render fix	Reduces slowdown from pirate “MISS” effects by coalescing compatible render passes. On by default; disable if you see rendering problems.
 DM_SAVE_TRACE	toggle	-	0	game:010090C022978003	Save traces	Record save operations and timing in Documents/log.txt. Applies at Play; relaunch to change.
 DM_KH_INPUT_TRACE	toggle	-	0	game:010090C022978003	Record controller inputs	Record changed controller states for offline replay. Applies at Play; relaunch to change.

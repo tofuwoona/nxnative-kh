@@ -28,6 +28,9 @@ harness = r'''
 #include <math.h>
 #include <stdio.h>
 #include "aspect_fill.h"
+#include "kh2_aspect.h"
+int dm_kh2_aspect_on(void) { return 0; } // this historical oracle tests the unchanged OFF path
+dm_kh2_extent dm_kh2_aspect_size(void) { return (dm_kh2_extent){0, 0}; }
 typedef double CGFloat;
 typedef struct { double x,y; } Point;
 typedef struct { double x,y,w,h; } Rect;

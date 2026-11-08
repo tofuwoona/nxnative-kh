@@ -1,5 +1,7 @@
 // Host front end (Mac: front_mac.m; iOS: dm/ios separately implements the same-named interface).
 #pragma once
+// After loading/final settings: capture viewport and initialize KH2 aspect
+// before any guest code; no live guest resolution changes on later UI resize.
 // Run the guest: with a window the guest runs on its own thread and the main thread belongs to the system UI; without a window it runs directly on the current thread.
 void front_run(void (*guest)(void));
 // The CAMetalLayer the graphics backend presents frames to (NULL when there is no window)

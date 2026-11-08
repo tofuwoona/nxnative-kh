@@ -47,6 +47,7 @@ static uint64_t c2_handle(int stage, unsigned b);   // the handle c2 holds at by
 #include "nvn_hmap.h"
 #include "../../host/dm.h"
 #include "../../host/aspect_fill.h"
+#include "../../host/kh2_aspect.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <stdarg.h>
 #include <mach-o/dyld.h>
@@ -8645,6 +8646,11 @@ static id<MTLTexture> present_raw_src(id<MTLTexture> src) {
 // narrows them, never widens past the input crop.
 static MTLViewport present_fit(double cx, double cy, double cw, double ch, double dw, double dh,
                                 double *ncx, double *ncy, double *ncw, double *nch) {
+    if (dm_kh2_aspect_on()) {
+        MTLViewport vp = {0, 0, 0, 0, 0, 1};
+        dm_kh2_aspect_fit(cw, ch, dw, dh, &vp.originX, &vp.originY, &vp.width, &vp.height);
+        return vp;   // retain the complete source; DM_ASPECT_FILL remains an independent preference
+    }
     if (dm_aspect_fill_on()) {
         double scale = fmax(dw / cw, dh / ch), vw = dw / scale, vh = dh / scale;
         *ncx = cx + (cw - vw) / 2; *ncw = vw;

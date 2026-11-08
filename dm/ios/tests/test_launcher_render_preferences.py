@@ -69,6 +69,28 @@ for value in ["0", "1"] {
     assert(defaults.string(forKey: "launcher." + key) != value, "env-file choice must not rewrite saved value")
 }
 print("PASS actual LauncherModel: new default=1, saved 0/1 retained, env-file 0/1 wins, removed HUD saved key inert")
+let aspect = "DM_KH2_ASPECT_EXPERIMENT", crop = "DM_ASPECT_FILL"
+assert(!file.settings.contains { $0.env == crop })
+for saved in [nil, "0", "1"] as [String?] {
+    defaults.removePersistentDomain(forName: suite)
+    if let value = saved { defaults.set(value, forKey: "launcher." + aspect) }
+    defaults.set("1", forKey: "launcher." + crop)
+    unsetenv(aspect); unsetenv(crop); unsetenv("DM_ENV_FILE_KEYS")
+    let model = LauncherModel(file.settings)
+    assert(model.values[aspect] == (saved ?? "1"))
+    model.apply()
+    assert(String(cString: getenv(aspect)!) == (saved ?? "1"))
+    assert(getenv(crop) == nil, "removed crop setting must not leak from saved preferences")
+}
+for value in ["0", "1"] {
+    defaults.set(value == "0" ? "1" : "0", forKey: "launcher." + aspect)
+    setenv("DM_ENV_FILE_KEYS", aspect, 1); setenv(aspect, value, 1)
+    let model = LauncherModel(file.settings)
+    model.apply()
+    assert(String(cString: getenv(aspect)!) == value)
+    assert(defaults.string(forKey: "launcher." + aspect) != value)
+}
+print("PASS actual LauncherModel: native aspect defaults ON, saved OFF/ON retained, explicit override preserved, legacy crop inert")
 let diagnostics = ["DM_SAVE_TRACE", "DM_KH_INPUT_TRACE", "DM_KH24_DIAG"]
 for key in diagnostics {
     for saved in [nil, "0", "1"] as [String?] {

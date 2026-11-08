@@ -2,6 +2,9 @@
 // oe::Initialize is in hle_sdkinit.c, not here.
 // Environment switches: DM_OPMODE=0 handheld / 1 console (default: the profile's op_mode, console unless set; console corresponds to the console-mode render profile); DM_LANG=language code (default en-US; the iOS app sets it from the IPA's DMLanguage, main.m).
 #include "hle.h"
+#include "kh2_aspect.h"
+#include "kh1_bar.h"
+#include "kh2_mask.h"
 
 // The operation mode is runtime state (the front end can change it: iOS overheat downgrade switches to handheld): the single source is here, taken once from DM_OPMODE at startup, the environment variable is not read again afterwards
 #include <stdatomic.h>
@@ -10,6 +13,45 @@ int dm_opmode(void) {
     int m = g_opmode;
     if (m < 0) { const char *e = getenv("DM_OPMODE"); int v = e ? atoi(e) : DM_GAME_OPMODE; int exp = -1; atomic_compare_exchange_strong(&g_opmode, &exp, v); m = g_opmode; }
     return m;
+}
+// Publish only after loading: iOS creates its first view before startup loading.
+// Build keys are the loader's 16-byte NSO identifiers, not original-byte guards.
+static _Atomic uint64_t g_kh2_aspect;
+dm_kh2_extent dm_kh2_aspect_size(void) {
+    uint64_t pair = atomic_load(&g_kh2_aspect);
+    return (dm_kh2_extent){(uint32_t)(pair >> 32), (uint32_t)pair};
+}
+int dm_kh2_aspect_on(void) { return dm_kh2_aspect_size().width != 0; }
+void dm_kh2_aspect_init(uint32_t viewport_w, uint32_t viewport_h) {
+    const char *e = getenv("DM_KH2_ASPECT_EXPERIMENT");
+    int kh1 = DM_GAME_PROGRAM_ID == 0x010090C022978001ull &&
+        !strcmp(dm_main_build(), "badf2faf580b712464365c4d529d92c9");
+    int kh2 = DM_GAME_PROGRAM_ID == 0x010090C022978003ull &&
+        !strcmp(dm_main_build(), "e1bced80ffd14436980f7490b1d3c3e7");
+    int on = (kh1 || kh2) && e && !strcmp(e, "1");
+    dm_kh2_extent size = kh1 ? dm_kh1_aspect_choose(viewport_w, viewport_h)
+                             : dm_kh2_aspect_choose(viewport_w, viewport_h);
+    if (on && !size.width) {
+        LOG("[RED] KH aspect rejected: unsupported viewport %ux%u", viewport_w, viewport_h);
+        on = 0;
+    }
+    const char *c = getenv("DM_KH2_CPU_ASPECT_EXPERIMENT");
+    if (kh2 && on && c && strcmp(c, "0") && strcmp(c, "1")) {
+        LOG("[RED] KH2 aspect rejected: CPU aspect switch must be 0 or 1");
+        on = 0;
+    }
+    // Integrated opt-in always couples CPU/GPU physical aspect. Explicit 0 is
+    // a mask-only differential diagnostic, not an accepted widescreen mode.
+    int cpu = kh2 && on && (!c || !strcmp(c, "1"));
+    int capable = kh2 ? dm_kh2_mask_apply(on | (cpu << 1)) :
+                  kh1 ? dm_kh1_bar_apply(on) : 1;
+    if (kh2 && on && !capable) LOG("[RED] KH2 aspect rejected: missing or invalid offline mask capability");
+    if (kh1 && on && !capable) LOG("[RED] KH1 aspect rejected: missing or invalid offline bar capability");
+    on = on && capable;
+    atomic_store(&g_kh2_aspect, on ? ((uint64_t)size.width << 32) | size.height : 0);
+    if (on && cpu) LOG("KH2 CPU aspect EXPERIMENT: original physical-aspect branch; runtime acceptance pending");
+    if (on && kh2) LOG("KH2 aspect EXPERIMENT: viewport %ux%u -> oe + Vulkan %ux%u + conditional guest masks; legacy crop bypassed; runtime acceptance pending", viewport_w, viewport_h, size.width, size.height);
+    if (on && kh1) LOG("KH1 aspect EXPERIMENT: viewport %ux%u -> OE + Vulkan %ux%u; fixed 720-line Hor+ projection; runtime acceptance pending", viewport_w, viewport_h, size.width, size.height);
 }
 // ---------- System notification queue (AppletMessage): front end state changes → fetched by the game every frame with TryPopNotificationMessage ----------
 // Message numbers the host sends: 15 focus change, 30 operation mode change, 31 performance mode change
@@ -126,6 +168,8 @@ static unsigned char g_cpu_oc;
 HLE_FORCE("_ZN2nn2oe21IsCpuOverclockEnabledEv", "CPU overclock state (through apm): what SetCpuOverclockEnabled set, off at start", unsigned, h_oe_CpuOc, void) { return g_cpu_oc; }
 HLE_FORCE("_ZN2nn2oe22SetCpuOverclockEnabledEb", "CPU overclock switch (through apm); the host does not scale clocks", void, h_oe_SetCpuOc, unsigned on) { g_cpu_oc = on & 0xff; }
 HLE_FORCE("_ZN2nn2oe27GetDefaultDisplayResolutionEPiS1_", "default display resolution: 1920x1080 docked, 1280x720 handheld", void, h_oe_DefRes, int *w, int *h) {
+    dm_kh2_extent size = dm_kh2_aspect_size();
+    if (size.width) { if (w) *w = (int)size.width; if (h) *h = (int)size.height; return; }
     int con = opmode() == 1; if (w) *w = con ? 1920 : 1280; if (h) *h = con ? 1080 : 720;
 }
 HLE_FORCE("_ZN2nn2oe38GetDefaultDisplayResolutionChangeEventEPNS_2os11SystemEventE", "default display resolution change event: bound, never signaled (the operation mode notification carries the change)",

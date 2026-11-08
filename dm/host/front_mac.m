@@ -19,6 +19,7 @@
 #include "pad_slots.h"
 #include "haptics_apple.h"
 #include "aspect_fill.h"
+#include "kh2_aspect.h"
 #include <signal.h>
 #include <math.h>
 
@@ -257,6 +258,11 @@ static void pads_start(void) {
     double ox, oy, fx, fy; dm_aspect_visible(w, h, &ox, &oy, &fx, &fy);   // DM_ASPECT_FILL=1: the visible (cropped) slice of the 16:9 touch space; otherwise the full frame
     if (!dm_aspect_fill_on()) { if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0; }   // the centered 16:9 picture the present fits into the view, as on the iPhone (DmGamepad.m)
     double x0 = dm_aspect_fill_on() ? 0 : (b.width - w) / 2, y0 = dm_aspect_fill_on() ? 0 : (b.height - h) / 2;
+    dm_kh2_extent size = dm_kh2_aspect_size();
+    if (size.width) {
+        dm_kh2_aspect_fit(size.width, size.height, b.width, b.height, &x0, &y0, &w, &h);
+        ox = oy = 0; fx = fy = 1;
+    }
     double nx = ox + fmin(fmax((p.x - x0) / w, 0), 1) * fx;
     double ny = oy + fmin(fmax(1 - (p.y - y0) / h, 0), 1) * fy;   // The AppKit view origin is at bottom left, the touchscreen origin is at top left
     dm_touch t = {0, (float)fmin(nx, 0.999), (float)fmin(ny, 0.999)};
@@ -284,10 +290,26 @@ static void *guest_tramp(void *p) {
 
 // Metal reads MTL_HUD_ENABLED when the process makes its first device, which can be before the window: set from DM_METAL_HUD before main (set in front_run, the HUD did not show)
 __attribute__((constructor)) static void hud_env(void) { if (getenv("DM_METAL_HUD") && atoi(getenv("DM_METAL_HUD"))) setenv("MTL_HUD_ENABLED", "1", 0); }
+// Diagnostic size is pixels, applied to the real content view BEFORE guest
+// startup. Headless uses it as an explicitly synthetic viewport, never a screen.
+static dm_kh2_extent kh2_viewport_request(void) {
+    const char *e = getenv("DM_KH2_VIEWPORT");
+    dm_kh2_extent requested = {0, 0};
+    if (e && !dm_kh2_aspect_parse_viewport(e, &requested))
+        die("DM_KH2_VIEWPORT must be WIDTHxHEIGHT pixels (320..4096 by 180..4096)");
+    return requested;
+}
 void front_run(void (*guest)(void)) {
     // A game: tell macOS its work is latency-critical, so the system does not trade its frame time for power while the frame rate is capped
     static id activity; activity = [[NSProcessInfo processInfo] beginActivityWithOptions:NSActivityUserInitiated | NSActivityLatencyCritical reason:@"game"];
-    if (!getenv("DM_WINDOW")) { guest(); return; }
+    dm_kh2_extent requested = kh2_viewport_request();
+    if (!getenv("DM_WINDOW")) {
+        dm_kh2_extent viewport = requested.width ? requested : (dm_kh2_extent){1920, 1080};
+        LOG("KH2 startup viewport: headless %s %ux%u (not a physical display)",
+            requested.width ? "diagnostic" : "16:9 fallback", viewport.width, viewport.height);
+        dm_kh2_aspect_init(viewport.width, viewport.height);
+        guest(); return;
+    }
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -309,6 +331,16 @@ void front_run(void (*guest)(void)) {
         v.layer = g_layer; [(DmGameView *)v fitDrawable];
         [win center];
         [win makeKeyAndOrderFront:nil];
+        if (requested.width) {
+            double scale = win.backingScaleFactor;
+            [win setContentSize:NSMakeSize(requested.width / scale, requested.height / scale)];
+        }
+        [(DmGameView *)v fitDrawable];
+        // Use the actual drawable, not the requested diagnostic size. AppKit
+        // rounding is observable in this log and must be checked by acceptance.
+        dm_kh2_extent viewport = dm_kh2_aspect_pixels(g_layer.drawableSize.width, g_layer.drawableSize.height);
+        LOG("KH2 startup viewport: window drawable %ux%u; requested %ux%u", viewport.width, viewport.height, requested.width, requested.height);
+        dm_kh2_aspect_init(viewport.width, viewport.height);
         g_screen_fps = (int)(win.screen ?: NSScreen.mainScreen).maximumFramesPerSecond;
         g_win = win;
         [NSApp activateIgnoringOtherApps:YES];

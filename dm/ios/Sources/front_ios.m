@@ -10,6 +10,7 @@
 #include "dm.h"
 #include "haptics_apple.h"
 #include "aspect_fill.h"
+#include "kh2_aspect.h"
 
 UIView *dm_gamepad_view(CGRect frame);
 void dm_gamepad_reset(void);
@@ -38,7 +39,14 @@ static UILabel *front_ios_fps_label(void);
 - (void)layoutSubviews {
     [super layoutSubviews];
     CAMetalLayer *l = (CAMetalLayer *)self.layer;
+    CGSize previous = l.drawableSize;
     l.drawableSize = CGSizeMake(self.bounds.size.width * l.contentsScale, self.bounds.size.height * l.contentsScale);
+    if (dm_kh2_aspect_on() && !CGSizeEqualToSize(previous, l.drawableSize)) {
+        CGSize native = UIScreen.mainScreen.nativeBounds.size;
+        LOG("KH native-aspect view: frame %g,%g %gx%g points; drawable %gx%g pixels; screen native %gx%g",
+            self.frame.origin.x, self.frame.origin.y, self.bounds.size.width, self.bounds.size.height,
+            l.drawableSize.width, l.drawableSize.height, native.width, native.height);
+    }
 }
 @end
 
@@ -87,7 +95,7 @@ static void launcher_done(void) { [g_root startGame]; }
     [super viewDidLayoutSubviews];
     CGRect b = self.view.bounds; if (!self.game) return;
     CGFloat w = b.size.width, h = b.size.height;   // Fit 16:9 into the whole screen (DM_ASPECT_FILL=1: let the game view take the whole screen instead; nvn_mtl.m crops the picture to match)
-    if (!dm_aspect_fill_on()) { if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0; }
+    if (!dm_kh2_aspect_on() && !dm_aspect_fill_on()) { if (w / h > 16.0 / 9.0) w = h * 16.0 / 9.0; else h = w * 9.0 / 16.0; }
     self.game.frame = CGRectMake(floor((b.size.width - w) / 2), floor((b.size.height - h) / 2), w, h);
     if (self.fps) {   // the top row's free stretch: right of DmGamepad.m's L3 key (102 + 17 of its units from the safe edge), level with − / + (22 units down); u is its unit
         CGRect s = UIEdgeInsetsInsetRect(b, self.view.safeAreaInsets); CGFloat u = MIN(b.size.height / 430.0, 1.3);
@@ -144,7 +152,25 @@ static UILabel *front_ios_fps_label(void) {
 }
 
 void *front_metal_layer(void) { return (__bridge void *)g_layer; }
-void front_run(void (*guest)(void)) { guest(); }   // Already on main.m's big-stack thread
+void front_run(void (*guest)(void)) {   // Already on main.m's big-stack thread
+    // The early game view is already letterboxed. Read the FULL root viewport,
+    // not that Metal view, on UIKit's queue. No loader access on the UI queue.
+    __block dm_kh2_extent viewport = {0, 0};
+    void (^capture)(void) = ^{
+        CGSize points = g_root.view.bounds.size;
+        UIScreen *screen = g_root.view.window.screen ?: UIScreen.mainScreen;
+        viewport = dm_kh2_aspect_pixels(points.width * screen.nativeScale, points.height * screen.nativeScale);
+    };
+    if ([NSThread isMainThread]) capture(); else dispatch_sync(dispatch_get_main_queue(), capture);
+    dm_kh2_aspect_init(viewport.width, viewport.height);
+    // Publication follows loaded-build/payload validation; finish the full-view
+    // layout before the guest can allocate render targets or initialize CPU state.
+    if (dm_kh2_aspect_on()) {
+        void (^layout)(void) = ^{ [g_root.view setNeedsLayout]; [g_root.view layoutIfNeeded]; };
+        if ([NSThread isMainThread]) layout(); else dispatch_sync(dispatch_get_main_queue(), layout);
+    }
+    guest();
+}
 
 // Software keyboard: show a UIAlertController on the main thread, the calling thread waits for the result
 int front_text_input(const char *title, const char *sub, const char *guide, const char *initial, int max_chars, char *out, int out_cap) {

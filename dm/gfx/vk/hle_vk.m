@@ -15,6 +15,7 @@
 // Environment: DM_VK_LOG=1 logs object creation; DM_VK_CAPTURE=<dir> writes every SPIR-V module the game creates (sh_capture).
 #define VK_NO_PROTOTYPES
 #include "../../host/hle.h"
+#include "../../host/kh2_aspect.h"
 #include "../nvn/nvn_mtl.h"
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
@@ -442,7 +443,11 @@ VK(vkGetPhysicalDeviceImageFormatProperties, VkResult, VkPhysicalDevice pd, VkFo
 VK(vkGetImageSparseMemoryRequirements, void, VkDevice d, VkImage i, uint32_t *n, VkSparseImageMemoryRequirements *r) { (void)d; (void)i; (void)r; *n = 0; }
 
 // ---------- Surface ----------
-static VkExtent2D surf_ext(void) { return dm_opmode() ? (VkExtent2D){1920, 1080} : (VkExtent2D){1280, 720}; }
+static VkExtent2D surf_ext(void) {
+    dm_kh2_extent size = dm_kh2_aspect_size();
+    if (size.width) return (VkExtent2D){size.width, size.height};
+    return dm_opmode() ? (VkExtent2D){1920, 1080} : (VkExtent2D){1280, 720};
+}
 VK(vkCreateViSurfaceNN, VkResult, VkInstance i, const VkViSurfaceCreateInfoNN *ci, const VkAllocationCallbacks *a, VkSurfaceKHR *out) {
     (void)i; (void)a; VkSurfaceKHR s = zalloc(sizeof *s); s->win = ci->window; *out = s;
     VLOG("CreateViSurfaceNN window %p", ci->window); return VK_SUCCESS;
@@ -1393,6 +1398,12 @@ static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t
     static int enabled = -1, min_init;
     static uint64_t min_submit, last_submit[13];
     static unsigned logged[13];
+    // Optional CPU-encoding-time prefix capture, NOT proof of GPU-visible bytes.
+    // Keep the old sparse trace unless explicitly requested. The call site only
+    // visits descriptor element 0 and the known shader/binding list below.
+    static int draws = -1;
+    static unsigned capped[13];
+    if (draws < 0) { const char *v = getenv("DM_VK_UBOTRACE_DRAWS"); draws = v && !strcmp(v, "1"); }
     if (enabled < 0) enabled = getenv("DM_VK_UBOTRACE") != NULL;
     if (!min_init) { const char *v = getenv("DM_VK_UBOTRACE_MIN_SUBMIT"); min_submit = v ? strtoull(v, NULL, 10) : 0; min_init = 1; }
     if (!enabled || r->kind != 'u' || r->set != 0 || !s->sq || s->sq->v < min_submit || s->sq->v > min_submit + 64) return;
@@ -1406,9 +1417,25 @@ static void vk_trace_ubo(rs_t *s, const shinfo *si, const shres *r, const desc_t
         else if (r->binding == 3) { id = base + 1; need = 448; }
         else if (r->binding == 4) { id = base + 2; need = 64; }
     } else if (!frag && !strcmp(si->key, "4224d4542e2f8e20") && r->binding == 2) { id = 9; need = 64; }
-    if (id < 0 || logged[id] >= 8 || last_submit[id] == s->sq->v || !e->buf || !e->buf.contents) return;
+    if (id < 0 || !e->buf || !e->buf.contents) return;
+    if (logged[id] >= (draws ? 128u : 8u)) {
+        if (draws && !capped[id]) { capped[id] = 1; VLOG("[UBOTRACE-DRAW-LIMIT] key=%s binding=%u limit=128 incomplete=1", si->key, r->binding); }
+        return;
+    }
+    if (!draws && last_submit[id] == s->sq->v) return;
     if (off > e->buf.length || need > e->buf.length - (NSUInteger)off) return;
     const uint8_t *b = (const uint8_t *)e->buf.contents + (NSUInteger)off;
+    if (draws) {
+        // 'need' is a known decoded prefix, not the descriptor's complete range.
+        char hex[2 * 448 + 1]; static const char digits[] = "0123456789abcdef";
+        if (need > 448) return;
+        for (size_t i = 0; i < need; ++i) { hex[2*i] = digits[b[i] >> 4]; hex[2*i+1] = digits[b[i] & 15]; }
+        hex[2*need] = 0;
+        VLOG("[UBOTRACE-DRAW] frame=%llu submit=%llu pass=%llu draw_counter=%llu key=%s frag=%d set=%u binding=%u slot=%u buffer=%p offset=%llu prefix_bytes=%zu observation=cpu-encode hex=%s",
+             (unsigned long long)atomic_load_explicit(&g_frames, memory_order_relaxed), (unsigned long long)s->sq->v,
+             (unsigned long long)atomic_load_explicit(&g_n_pass, memory_order_relaxed), (unsigned long long)atomic_load_explicit(&g_n_draw, memory_order_relaxed),
+             si->key, frag, r->set, r->binding, r->slot, (__bridge void *)e->buf, (unsigned long long)off, need, hex);
+    }
     if (id == 0 || id == 3 || id == 6) {
         float safe, xz, xw, fill, px, py, mx, my, vp[4]; uint32_t fog;
         memcpy(&px, b, 4); memcpy(&py, b + 4, 4); memcpy(&xz, b + 24, 4); memcpy(&xw, b + 28, 4);

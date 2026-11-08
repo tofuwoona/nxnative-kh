@@ -13,19 +13,21 @@ spec.loader.exec_module(settings)
 
 
 class LauncherSettingsTests(unittest.TestCase):
-    def test_kh_aspect_fill_is_opt_in_and_game_scoped(self):
+    def test_native_aspect_is_default_on_for_kh1_and_kh2_without_crop(self):
         profiles = ROOT / 'dm/games/010090C022978000/direct-profiles'
         with tempfile.TemporaryDirectory() as tmp, patch.object(settings.nacp, 'languages', return_value=['en-US']):
             with patch.dict(os.environ, {'DM_GAMES_DIR': str(profiles), 'DM_GAMES_FIRST': '1', 'GFXAPI': 'vulkan'}):
                 for gid, expected in [('010090C022978001', 1), ('010090C022978003', 1), ('01007EF00011E000', 0)]:
                     with self.subTest(gid=gid):
                         rows = settings.build(gid, tmp, Path(tmp) / 'control.nacp')['settings']
-                        found = [s for s in rows if s['env'] == 'DM_ASPECT_FILL']
+                        self.assertNotIn('DM_ASPECT_FILL', [s['env'] for s in rows])
+                        found = [s for s in rows if s['env'] == 'DM_KH2_ASPECT_EXPERIMENT']
                         self.assertEqual(len(found), expected)
                         if found:
                             self.assertEqual(found[0]['kind'], 'toggle')
-                            self.assertEqual(found[0]['default'], '0')
-                            self.assertIn('crop', found[0]['note'].lower())
+                            self.assertEqual(found[0]['default'], '1')
+                            self.assertEqual(found[0]['label'], 'Native display aspect')
+                            self.assertIn('Off restores 16:9', found[0]['note'])
 
     def test_kh2_miss_fix_defaults_on_only_for_program3(self):
         profiles = ROOT / 'dm/games/010090C022978000/direct-profiles'
