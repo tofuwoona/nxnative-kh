@@ -11,6 +11,8 @@ t_builtin.dSYM/
 t_pace
 t_timestamp
 t_timestamp.dSYM/
+t_vk_movie_cache
+t_vk_movie_cache.dSYM/
 t_fstep
 .precommit.err
 .precommit_snap/

@@ -20,6 +20,7 @@
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vulkan_vi.h>
 #include "pass_coalesce.h"
+#include "vk_movie_cache.h"
 #import <Metal/Metal.h>
 #include <CommonCrypto/CommonDigest.h>
 #include <mach-o/getsect.h>
@@ -494,14 +495,44 @@ VK(vkDestroyDevice, void, VkDevice d, const VkAllocationCallbacks *a) { (void)d;
 VK(vkGetDeviceQueue, void, VkDevice d, uint32_t fam, uint32_t idx, VkQueue *q) { (void)d; (void)fam; (void)idx; *q = &g_queue; }
 
 // ---------- Memory and buffers ----------
+// KH2 creates and frees one 1280x720 Y upload and one 640x360 RG upload per movie frame. Releasing thousands of short-lived shared MTLBuffers leaves
+// their VM backing charged to the process on iOS. Vulkan requires memory to be idle before vkFreeMemory, so a small exact-size cache can safely reuse those
+// buffers. Keep every other title and allocation size on the ordinary lifetime path.
+#define MOVIE_CACHE_SLOTS DM_VK_MOVIE_CACHE_SLOTS
+static dm_vk_movie_cache_slot g_movie_cache_slots[MOVIE_CACHE_SLOTS];
+static __strong id<MTLBuffer> g_movie_cache_buffers[MOVIE_CACHE_SLOTS];
+static int movie_cache_enabled(void) {
+    static int initialized, enabled;
+    if (!initialized) {
+        enabled = dm_vk_movie_cache_enabled(DM_GAME_PROGRAM_ID, getenv("DM_VK_CACHE_MOVIE_STAGING"));
+        initialized = 1;
+        if (enabled) VLOG("KH2 1280x720 NV12 Vulkan staging-buffer cache enabled");
+    }
+    return enabled;
+}
+static id<MTLBuffer> movie_cache_take(VkDeviceSize size) {
+    int slot = dm_vk_movie_cache_take_slot(g_movie_cache_slots, movie_cache_enabled(), size);
+    if (slot < 0) return nil;
+    id<MTLBuffer> b = g_movie_cache_buffers[slot];
+    g_movie_cache_buffers[slot] = nil;
+    return b;
+}
+static int movie_cache_put(VkDeviceSize size, id<MTLBuffer> b) {
+    if (!b) return 0;
+    int slot = dm_vk_movie_cache_put_slot(g_movie_cache_slots, movie_cache_enabled(), size);
+    if (slot < 0) return 0;
+    g_movie_cache_buffers[slot] = b;
+    return 1;
+}
 static id<MTLBuffer> mem_buf(VkDeviceMemory m) {
     void *r = atomic_load_explicit(&m->raw, memory_order_acquire);
     if (r) return (__bridge id<MTLBuffer>)r;
     pthread_mutex_lock(&g_mem_mu);
     if (!m->buf) {
-        m->buf = [g_dev newBufferWithLength:m->size ? m->size : 16 options:MTLResourceStorageModeShared];
+        int reused = 0; m->buf = movie_cache_take(m->size); if (m->buf) reused = 1;
+        else m->buf = [g_dev newBufferWithLength:m->size ? m->size : 16 options:MTLResourceStorageModeShared];
         if (!m->buf) LOG("[vk] [RED] cannot create an MTLBuffer of %llu bytes", (unsigned long long)m->size);
-        else { atomic_store_explicit(&m->raw, (__bridge void *)m->buf, memory_order_release); g_mem_bytes += m->size; }
+        else { atomic_store_explicit(&m->raw, (__bridge void *)m->buf, memory_order_release); if (!reused) g_mem_bytes += m->size; }
     }
     pthread_mutex_unlock(&g_mem_mu);
     return m->buf;
@@ -515,8 +546,10 @@ VK(vkAllocateMemory, VkResult, VkDevice d, const VkMemoryAllocateInfo *ai, const
 }
 VKB(vkFreeMemory, void, VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *a) {
     (void)d; (void)a; if (!m) return;
-    if (m->buf) g_mem_bytes -= m->size;
-    m->buf = nil; free(m);
+    pthread_mutex_lock(&g_mem_mu);
+    if (m->buf && !movie_cache_put(m->size, m->buf)) { g_mem_bytes -= m->size; m->buf = nil; }
+    else m->buf = nil;
+    pthread_mutex_unlock(&g_mem_mu); free(m);
 }
 VKB(vkMapMemory, VkResult, VkDevice d, VkDeviceMemory m, VkDeviceSize off, VkDeviceSize size, VkMemoryMapFlags fl, void **pp) {
     (void)d; (void)size; (void)fl;
