@@ -554,8 +554,12 @@ VKB(vkFreeMemory, void, VkDevice d, VkDeviceMemory m, const VkAllocationCallback
 VKB(vkMapMemory, VkResult, VkDevice d, VkDeviceMemory m, VkDeviceSize off, VkDeviceSize size, VkMemoryMapFlags fl, void **pp) {
     (void)d; (void)size; (void)fl;
     if (m->type == 0) RED1("mapped invisible memory (type 0)");
-    id<MTLBuffer> b = mem_buf(m); if (!b) return VK_ERROR_MEMORY_MAP_FAILED;
-    *pp = (uint8_t *)b.contents + off; return VK_SUCCESS;
+    // contents is NS_RETURNS_INNER_POINTER; drain its temporary retain here.
+    // m->buf still owns the mapped storage until the Vulkan memory is freed.
+    @autoreleasepool {
+        id<MTLBuffer> b = mem_buf(m); if (!b) return VK_ERROR_MEMORY_MAP_FAILED;
+        *pp = (uint8_t *)b.contents + off; return VK_SUCCESS;
+    }
 }
 VK(vkUnmapMemory, void, VkDevice d, VkDeviceMemory m) { (void)d; (void)m; }
 VK(vkFlushMappedMemoryRanges, VkResult, VkDevice d, uint32_t n, const VkMappedMemoryRange *r) { (void)d; (void)n; (void)r; return VK_SUCCESS; }   // shared storage is coherent

@@ -171,6 +171,16 @@ t_upgrade_alias: t_upgrade_alias.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_upgrade_alias.m $(MTL_T_SRC) $(FW)
 t_stencil_view: t_stencil_view.m $(MTL_T_DEP)
 	clang $(CFLAGS) -fobjc-arc -o $@ t_stencil_view.m $(MTL_T_SRC) $(FW)
+# Map lifetime regression compiles the actual renderer fresh on every invocation.
+# CPU mode links Apple frameworks but creates no Metal device. GPU checks are opt-in.
+.PHONY: check_vk_map_pool_cpu check_vk_map_pool_metal
+VK_MAP_TEST_DEPS=../vk/hle_vk.m $(wildcard ../vk/*.h) ../vk/tests/test_map_pool.py ../vk/tests/t_map_pool_cpu.m ../vk/tests/t_map_pool_metal.m
+check_vk_map_pool_cpu: $(VK_MAP_TEST_DEPS)
+	python3 ../vk/tests/test_map_pool.py -v
+check_vk_map_pool_metal: $(VK_MAP_TEST_DEPS)
+	python3 ../vk/tests/test_map_pool.py --metal -v
+run: check_vk_map_pool_cpu
+
 # The Vulkan layer (#included) over the whole NVN layer, whose device and present path it uses
 t_vk_desc: t_vk_desc.m ../vk/hle_vk.m ../vk/vk_movie_cache.h $(MTL_T_DEP)
 	clang $(CFLAGS) -I../../third_party/vulkan-headers/include -fobjc-arc -o $@ t_vk_desc.m $(MTL_T_SRC) ../nvn/nvn_mtl.m $(FW)
